@@ -57,6 +57,10 @@ type reconfigTarget interface {
 	SetProjectLeadsFile(string)
 	SetProjectLeadsGroup(string)
 	SetMCPSkillsDir(string)
+	// SetSiteAppPolicy takes the configuration itself rather than one
+	// value: an app's policy is several parameters, and which apps
+	// exist is not known until they are read.
+	SetSiteAppPolicy(*config.Config)
 	SetMCPDisabledTools(string)
 	SetMCPRedactSecrets(string)
 	SetMCPRedactDisabledRules(string)
@@ -340,6 +344,14 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_AP_ASSIGNMENT_REST_URL"},
 	{name: "HTTP_API_AP_ASSIGNMENT_REST_TOKEN_FILE"},
 	{name: "HTTP_API_AP_ASSIGNMENT_STALE_SECONDS"},
+	// The site app library and its rescan timer are built at startup,
+	// so moving the directory or changing the interval needs a
+	// restart. The POLICY in HTTP_API_SITE_APP_* is not here: it is
+	// not one parameter per app, and a new app brings parameters this
+	// table could not have been watching, so it is re-read whole on
+	// every reconfigure (see reconfigure).
+	{name: "HTTP_API_SITE_APPS_DIR"},
+	{name: "HTTP_API_SITE_APPS_RELOAD_INTERVAL"},
 }
 
 // reconfigWatcher remembers what each known parameter was set to, so a
@@ -383,6 +395,14 @@ func (w *reconfigWatcher) reconfigure(cfg *config.Config) {
 			applied = append(applied, "HTTP_API_MCP_SKILLS_DIR")
 		}
 	}
+
+	// Site app policy is spread over a parameter per app per setting,
+	// and publishing a new app adds names nothing was watching. A diff
+	// of any one of them cannot see that, so the whole lot is re-read
+	// and the bundle directory rescanned on every reconfigure. This is
+	// also how an operator makes a policy edit take effect now rather
+	// than at the end of the reload interval.
+	w.srv.SetSiteAppPolicy(cfg)
 
 	// Same for the project leads file: its contents live outside the
 	// configuration, so a diff of the path cannot see an edit to it.

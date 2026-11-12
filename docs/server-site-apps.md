@@ -28,31 +28,52 @@ A group gives you two files — a bundle and its checksum:
 scp cryoem.zip cryoem.zip.sha256 ap.example.edu:/etc/condor/webapps/
 ```
 
-You write one more, once, naming who may see it:
+You decide, once, who may see it:
 
-```yaml
-# /etc/condor/webapps/cryoem.yaml
-groups: [smith_lab]
-home: true
+```
+# /etc/condor/config.d/51-site-apps.conf
+HTTP_API_SITE_APP_CRYOEM_GROUPS = smith_lab
+HTTP_API_SITE_APP_CRYOEM_HOME   = true
 ```
 
-The server notices within `HTTP_API_SITE_APPS_RELOAD_INTERVAL` and
-serves it at `/site/cryoem/`. No restart and no signal.
+```bash
+condor_reconfig -daemon htcondor-api
+```
 
-**A bundle with no policy file beside it is not served**, and says so
-in the log. Who may see an app is your decision, never the bundle's: a
-bundle that names its own groups is refused outright. The app's author
-has no idea which groups exist here, and their natural placeholder is
+The app is then served at `/site/cryoem/`. A reconfigure re-reads every
+site app's policy and rescans the directory, so it takes effect at
+once; without one the next rescan picks it up within
+`HTTP_API_SITE_APPS_RELOAD_INTERVAL`.
+
+**A bundle no configuration names is not served**, and says so in the
+log. Who may see an app is your decision, never the bundle's: a bundle
+that names its own groups is refused outright. The app's author has no
+idea which groups exist here, and their natural placeholder is
 "everyone".
 
-### The policy file
+### Why configuration rather than a file beside the bundle
 
-| Key | Meaning |
+Every other group gate this server has —
+`HTTP_API_WEBUI_ACCESS_GROUP`, `HTTP_API_WEBUI_ADMIN_GROUP`,
+`HTTP_API_SUPERUSER_GROUP`, the MCP ones — is an `HTTP_API_*`
+parameter. Keeping these with them means `condor_config_val -dump
+HTTP_API` answers "who can see what here?" in one place, and your
+configuration management deploys an access point without a second
+mechanism to learn.
+
+### The parameters
+
+An app is `cryoem` if its bundle is `cryoem.zip`. Its parameters are
+named after it, upper-cased:
+
+| Parameter | Meaning |
 | --- | --- |
-| `groups` | Required. Groups that may see the app, as a YAML list. `["*"]` means every authenticated user. There is no default, and an empty list is an error rather than "nobody". |
-| `home` | Members of an app-only group land here instead of the dashboard. See [App-only sessions](#app-only-sessions). |
-| `enabled` | `false` withdraws the app without deleting it. Absent means enabled. |
-| `name` / `description` / `icon` | Override what the bundle calls itself, for a site that wants its own wording. |
+| `HTTP_API_SITE_APP_<ID>_GROUPS` | Required. Comma-separated groups that may see the app. `*` means every authenticated user. Nothing is published without it, and an empty value publishes nothing rather than publishing to nobody. |
+| `HTTP_API_SITE_APP_<ID>_HOME` | Members of an app-only group land here instead of the dashboard. See [App-only sessions](#app-only-sessions). |
+| `HTTP_API_SITE_APP_<ID>_ENABLED` | `false` withdraws the app without deleting it. Absent means enabled. |
+| `HTTP_API_SITE_APP_<ID>_NAME` | Override what the bundle calls itself. |
+| `HTTP_API_SITE_APP_<ID>_DESCRIPTION` | As above, for the one-line description. |
+| `HTTP_API_SITE_APP_<ID>_ICON` | As above, for the icon. |
 
 Group names are compared case-insensitively, because a Unix group, a
 file and an OIDC claim do not agree about case often enough to make an
@@ -61,13 +82,20 @@ exact match safe.
 ### The id is the file name
 
 `cryoem.zip` is the app `cryoem`, served at `/site/cryoem/` and
-configured by `cryoem.yaml`. The bundle carries no id of its own.
+configured by `HTTP_API_SITE_APP_CRYOEM_*`. The bundle carries no id of
+its own.
 
 Upgrading is replacing the file. Trying a new version alongside the
-running one is copying it to `cryoem-next.zip` and writing a
-`cryoem-next.yaml` that names only yourself — a separate app, at a
-separate URL, with its own policy, from the same artifact. The app does
-not need rebuilding to be served under the second name.
+running one is copying it to `cryoem_next.zip` and giving
+`HTTP_API_SITE_APP_CRYOEM_NEXT_GROUPS` your own account — a separate
+app, at a separate URL, with its own policy, from the same artifact.
+The app does not need rebuilding to be served under the second name.
+
+A hyphen in an id becomes an underscore in the parameter name, since a
+hyphen inside an HTCondor parameter name reads as subtraction wherever
+the name is used in an expression. That makes `my-app` and `my_app` the
+same parameter, so deploying both refuses **both** rather than guessing
+which policy was meant for which; rename one.
 
 ### Checking what arrived
 
@@ -76,11 +104,42 @@ published; a mismatch refuses it and logs loudly. Zip's own per-entry
 checksums do not cover this case: an interrupted copy produces an
 archive that opens cleanly and serves part of the app.
 
+Every bundle is hashed whether or not a `.sha256` accompanies it, and
+the hash is recorded (see [What has been served](#what-has-been-served)).
+The sidecar is what turns "these are the bytes we found" into "these
+are the bytes the author sent".
+
 If the group's build is reproducible — `make bundle` in the starter
 repository below produces identical bytes from identical source — you
 can also rebuild from their tagged commit and compare, which answers
 "is what is deployed what they shipped?" rather than only "did it
 arrive intact?".
+
+## What has been served
+
+The configuration says what you intend. It cannot tell you what was
+running in October: a bundle replaced in place leaves nothing behind,
+and a configuration file only ever describes now.
+
+So each scan records what it published, in `site_app_incarnations` in
+the application database. A row is one app, served from one artifact,
+under one policy, over a period — `first_seen` to `last_seen`. A scan
+that finds nothing changed extends the open row; a new bundle, or a
+change to who may see it, opens another. An app that stops being served
+is simply not mentioned again, and its row's `last_seen` is when it
+stopped.
+
+```sql
+-- What was being served on 3 October, and to whom?
+SELECT app_id, version, digest, app_groups
+  FROM site_app_incarnations
+ WHERE first_seen <= unixepoch('2026-10-03') AND last_seen >= unixepoch('2026-10-03');
+```
+
+`version` and `revision` are whatever the bundle's `app.yaml` claimed,
+which is the author's word rather than a checked fact — `digest` is the
+checked one. Recording is not a condition of serving: a database that
+cannot be written is logged and the apps stay up.
 
 ## App-only sessions
 
@@ -151,8 +210,9 @@ staff that is usually an easy call. It should still be a knowing one.
 
 | Knob | Effect |
 | --- | --- |
-| `HTTP_API_SITE_APPS_DIR` | Directory holding `<id>.zip` bundles and their `<id>.yaml` policy files. Unset disables site apps entirely — no `/site/` routes are registered. |
-| `HTTP_API_SITE_APPS_RELOAD_INTERVAL` | How often that directory is rescanned, as a Go duration (`30s`, `5m`). Default one minute. |
+| `HTTP_API_SITE_APPS_DIR` | Directory holding `<id>.zip` bundles. Unset disables site apps entirely — no `/site/` routes are registered. Changing it needs a restart. |
+| `HTTP_API_SITE_APPS_RELOAD_INTERVAL` | How often that directory is rescanned, as a Go duration (`30s`, `5m`). Default one minute. Changing it needs a restart. |
+| `HTTP_API_SITE_APP_<ID>_*` | One app's policy; see [The parameters](#the-parameters). Re-read on every `condor_reconfig`, which also rescans the directory. |
 | `HTTP_API_WEBUI_APP_ONLY_GROUP` | Comma-separated groups whose members land in their app rather than the dashboard. Reloaded on SIGHUP. |
 
 An unpacked directory works in place of a zip, with the same layout, for
@@ -166,12 +226,13 @@ a browser looks the same whatever the reason.
 
 | Log says | Means |
 | --- | --- |
-| `cryoem.zip is present but cryoem.yaml is missing; not published` | Write the policy file. |
-| `its policy file names no groups` | `groups` is required; `["*"]` publishes to every authenticated user. |
+| `cryoem.zip is present but no configuration names who may see it` | Set `HTTP_API_SITE_APP_CRYOEM_GROUPS` and reconfigure. |
+| `names groups, but no bundle ... has that id` | A policy with no bundle: a typo in the parameter name, or the zip was never copied across. |
+| `share the configuration name` | Two bundles whose ids differ only by `-` versus `_`. Rename one; neither is published. |
 | `bundle digest mismatch` | The file on disk is not the one that was built. Copy it again. |
-| `app.yaml names groups, which a bundle cannot set` | The group put `groups` in their bundle. It belongs in your policy file. |
+| `app.yaml names groups, which a bundle cannot set` | The group put `groups` in their bundle. It belongs in your configuration. |
 | `bundle has no web/index.html` | The bundle is laid out wrongly; `make bundle` in the starter repository gets this right. |
 
 An app that loads but is not visible to the person asking is a group
 mismatch: `GET /api/v1/auth/me` reports the groups the server resolved
-for them, which is what the policy file is matched against.
+for them, which is what `HTTP_API_SITE_APP_<ID>_GROUPS` is matched against.

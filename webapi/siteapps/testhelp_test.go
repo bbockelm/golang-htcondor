@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -60,13 +62,6 @@ func defaultFiles() map[string]string {
 }
 
 // writePolicy writes the operator's <id>.yaml beside the bundle.
-func writePolicy(t *testing.T, dir, id, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, id+".yaml"), []byte(body), 0o600); err != nil {
-		t.Fatalf("write policy: %v", err)
-	}
-}
-
 // writeDigest writes the .sha256 sidecar for a bundle, in shasum's
 // output format.
 func writeDigest(t *testing.T, bundlePath string) {
@@ -92,4 +87,49 @@ func readFS(t *testing.T, fsys fs.FS, name string) string {
 		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(data)
+}
+
+// testParams is a configuration stated as a map, standing in for the
+// HTCondor configuration a real deployment reads policy from.
+type testParams struct{ m map[string]string }
+
+func newTestParams() *testParams { return &testParams{m: map[string]string{}} }
+
+func (p *testParams) Get(key string) (string, bool) {
+	v, ok := p.m[strings.ToUpper(key)]
+	return v, ok
+}
+
+func (p *testParams) GetBool(key string, def bool) bool {
+	v, ok := p.Get(key)
+	if !ok {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "t", "1", "yes":
+		return true
+	case "false", "f", "0", "no":
+		return false
+	}
+	return def
+}
+
+func (p *testParams) Keys() []string {
+	out := make([]string, 0, len(p.m))
+	for k := range p.m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setPolicy publishes an app to groups, the way an operator's
+// configuration does. Extra settings are given as NAME, value pairs:
+//
+//	setPolicy(cfg, "cryoem", "smith_lab", "HOME", "true")
+func setPolicy(p *testParams, id, groups string, kv ...string) {
+	p.m[strings.ToUpper(ConfigKey(id, "GROUPS"))] = groups
+	for i := 0; i+1 < len(kv); i += 2 {
+		p.m[strings.ToUpper(ConfigKey(id, kv[i]))] = kv[i+1]
+	}
 }

@@ -1153,9 +1153,10 @@ type HandlerConfig struct {
 	// Documentation must never describe it as a restriction, or someone
 	// will eventually rely on it as one.
 	WebUIAppOnlyGroup string
-	// SiteAppsDir holds <id>.zip bundles and their <id>.yaml policy
-	// files. Empty disables site apps entirely: no library is built and
-	// no /site/ route is registered.
+	// SiteAppsDir holds <id>.zip bundles. Who may see each one is read
+	// from HTCondorConfig (HTTP_API_SITE_APP_<ID>_GROUPS), not from
+	// the directory. Empty disables site apps entirely: no library is
+	// built and no /site/ route is registered.
 	SiteAppsDir string
 	// SiteAppsReloadInterval is how often that directory is rescanned,
 	// so dropping a new bundle in place needs no restart and no signal.
@@ -2079,7 +2080,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// runs before there is a context for the rescan goroutine.
 	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
 	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
-	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir)
+	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir, cfg.HTCondorConfig)
 	h.branding = newBrandingState(logger, brandingOptions{
 		SiteName:    cfg.WebUISiteName,
 		SiteTagline: cfg.WebUISiteTagline,

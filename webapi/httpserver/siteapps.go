@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/bbockelm/golang-htcondor/config"
+
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
 )
@@ -31,13 +33,48 @@ const defaultSiteAppsReload = time.Minute
 // The first scan is synchronous so the first request after startup
 // sees the apps, and so an operator's mistake is in the log before
 // anybody tries the link.
-func (h *Handler) newSiteAppLibrary(dir string) *siteapps.Library {
+func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps.Library {
 	if dir == "" {
 		return nil
 	}
-	lib := siteapps.NewLibrary(dir)
+	lib := siteapps.NewLibrary(dir, siteAppPolicy(params))
+	// What was served, and when. Absent a database -- the demo server,
+	// most tests -- nothing is recorded and everything else works the
+	// same.
+	lib.SetRecorder(siteapps.NewSQLRecorder(h.db))
 	h.logSiteAppReload(lib.Reload())
 	return lib
+}
+
+// siteAppPolicy builds the policy source for a configuration.
+//
+// The nil check is load-bearing: a *config.Config that is nil put into
+// a PolicySource interface makes an interface that is NOT nil, so
+// every lookup would call a method on a nil pointer rather than
+// finding no policy. A server with no HTCondor configuration -- demo
+// mode, tests -- declares no apps instead.
+func siteAppPolicy(params *config.Config) siteapps.PolicySource {
+	if params == nil {
+		return siteapps.NewConfigPolicy(nil)
+	}
+	return siteapps.NewConfigPolicy(params)
+}
+
+// SetSiteAppPolicy installs policy read from a freshly-loaded
+// configuration and rescans.
+//
+// Called on every reconfigure rather than when a parameter is seen to
+// change, because an app's policy is spread over several parameters
+// and a new app adds parameters that were not there to diff. The scan
+// is what applies them, so it runs here rather than waiting out the
+// reload interval: an operator who has just run condor_reconfig has
+// said when they want this to take effect.
+func (h *Handler) SetSiteAppPolicy(params *config.Config) {
+	if h.siteApps == nil {
+		return
+	}
+	h.siteApps.SetPolicySource(siteAppPolicy(params))
+	h.logSiteAppReload(h.siteApps.Reload())
 }
 
 // runSiteAppReloads rescans the bundle directory until ctx is done.

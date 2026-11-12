@@ -1,16 +1,24 @@
 package siteapps
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// recordTimeout bounds one audit write. Generous: the write is a
+// handful of small statements, and the only reason to give up is a
+// database that is not answering at all.
+const recordTimeout = 10 * time.Second
 
 // Entry is one published app: its metadata and its opened content.
 type Entry struct {
@@ -33,6 +41,13 @@ type Library struct {
 
 	mu   sync.Mutex // serializes rescans, not reads
 	snap atomicSnapshot
+
+	// policySrc is the operator's decisions, replaced wholesale on a
+	// reconfigure. See SetPolicySource.
+	policySrc atomic.Pointer[PolicySource]
+
+	// rec records what was served, for the audit trail. Optional.
+	rec atomic.Pointer[Recorder]
 
 	// retired holds bundles a reload replaced, kept open for a grace
 	// period before their descriptors are closed.
@@ -76,11 +91,45 @@ type snapshot struct {
 
 // NewLibrary creates a library over dir. It does not scan; call
 // Reload.
-func NewLibrary(dir string) *Library {
+func NewLibrary(dir string, policy PolicySource) *Library {
 	l := &Library{dir: dir, retireGrace: defaultRetireGrace}
 	l.snap.store(&snapshot{byID: map[string]*Entry{}})
+	l.SetPolicySource(policy)
 	return l
 }
+
+// SetPolicySource installs the policy a rescan will read.
+//
+// A reconfigure hands the daemon a freshly-read configuration rather
+// than mutating the one it was started with, so the source has to be
+// replaced rather than re-read. Stored through an atomic pointer
+// because a rescan may be running on the reload goroutine while the
+// signal goroutine calls this.
+//
+// A nil source declares nothing, which publishes nothing. That is the
+// same answer as a configuration naming no apps, and it is the right
+// one: a server that has lost track of who may see what must not keep
+// serving on the strength of the last policy it remembers.
+func (l *Library) SetPolicySource(policy PolicySource) {
+	if policy == nil {
+		policy = emptyPolicy{}
+	}
+	l.policySrc.Store(&policy)
+}
+
+// policy is the installed source.
+func (l *Library) policy() PolicySource {
+	if p := l.policySrc.Load(); p != nil {
+		return *p
+	}
+	return emptyPolicy{}
+}
+
+// emptyPolicy declares no apps.
+type emptyPolicy struct{}
+
+func (emptyPolicy) Policy(string) (Policy, bool) { return Policy{}, false }
+func (emptyPolicy) DeclaredIDs() []string        { return nil }
 
 // Dir is the directory this library scans.
 func (l *Library) Dir() string { return l.dir }
@@ -137,6 +186,7 @@ func (l *Library) Reload() (published int, problems []error) {
 
 	old := l.snap.load()
 	next := &snapshot{byID: make(map[string]*Entry)}
+	var found []string
 
 	for _, de := range dirEntries {
 		name := de.Name()
@@ -162,6 +212,11 @@ func (l *Library) Reload() (published int, problems []error) {
 			problems = append(problems, err)
 			continue
 		}
+		// Recorded before the load is attempted, so a bundle that
+		// fails to open still counts as present: its policy is not an
+		// orphan, it is a policy for something broken, and saying
+		// otherwise would send the operator after the wrong fault.
+		found = append(found, id)
 		if _, dup := next.byID[id]; dup {
 			// A directory and a zip with the same stem. Refuse both
 			// rather than letting file-system order decide.
@@ -182,6 +237,37 @@ func (l *Library) Reload() (published int, problems []error) {
 		next.byID[id] = entry
 	}
 
+	// Two bundles whose ids differ only by hyphen-versus-underscore
+	// share one set of configuration parameters, so neither can be
+	// given a policy of its own. Refuse both: publishing either would
+	// publish it under a policy that may have been written for the
+	// other, and which one wins would come down to directory order.
+	for macro, ids := range MacroCollision(found) {
+		problems = append(problems, fmt.Errorf(
+			"site apps %s share the configuration name %s, so neither can be given its own "+
+				"policy; rename one of the bundles. Neither is published",
+			strings.Join(quoteAll(ids), " and "), configPrefix+macro+"_GROUPS"))
+		for _, id := range ids {
+			delete(next.byID, id)
+		}
+	}
+
+	// A policy naming an app with no bundle is usually a typo in the
+	// parameter name or a bundle that was never copied across. Neither
+	// is visible any other way: nothing is served, and nothing in the
+	// directory is wrong.
+	seen := make(map[string]bool, len(found))
+	for _, id := range found {
+		seen[MacroID(id)] = true
+	}
+	for _, macro := range l.policy().DeclaredIDs() {
+		if !seen[macro] {
+			problems = append(problems, fmt.Errorf(
+				"%s names groups, but no bundle in %s has that id; nothing is served for it",
+				configPrefix+macro+"_GROUPS", l.dir))
+		}
+	}
+
 	next.order = make([]string, 0, len(next.byID))
 	for id := range next.byID {
 		next.order = append(next.order, id)
@@ -189,7 +275,15 @@ func (l *Library) Reload() (published int, problems []error) {
 	sort.Strings(next.order)
 
 	l.snap.store(next)
-	l.retire(old, next, time.Now())
+	now := time.Now()
+	l.retire(old, next, now)
+	if err := l.record(next, now); err != nil {
+		// Recording is an account of what was served, not a condition
+		// of serving it. A database that is unwritable must not take
+		// the apps down with it, so this is reported and the scan
+		// stands.
+		problems = append(problems, err)
+	}
 	return len(next.byID), problems
 }
 
@@ -204,27 +298,14 @@ func (l *Library) loadOne(path, id string, old *snapshot) (*Entry, error) {
 		return nil, fmt.Errorf("site app %q: %w", id, err)
 	}
 
-	sitePath := filepath.Join(l.dir, id+".yaml")
-	siteData, err := os.ReadFile(sitePath) //nolint:gosec // operator-configured directory
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Fail closed, and say so. Who may see an app is the site's
-			// decision; a bundle that arrived without one is not a
-			// bundle anybody has decided to publish yet.
-			return nil, fmt.Errorf("site app %q: %s is present but %s is missing; not published. "+
-				"Write %s naming the groups that may see it", id, filepath.Base(path),
-				filepath.Base(sitePath), filepath.Base(sitePath))
-		}
-		return nil, fmt.Errorf("site app %q: read %s: %w", id, filepath.Base(sitePath), err)
+	// Fail closed. Who may see an app is the site's decision, and a
+	// bundle nobody has made that decision about is not published --
+	// however long it has been sitting in the directory.
+	policy, ok := l.policy().Policy(id)
+	if !ok {
+		return nil, UnconfiguredMessage(id, filepath.Base(path))
 	}
-	if len(siteData) > maxManifestBytes {
-		return nil, fmt.Errorf("site app %q: %s is larger than %d bytes", id, filepath.Base(sitePath), maxManifestBytes)
-	}
-	site, err := ParseSiteManifest(siteData)
-	if err != nil {
-		return nil, fmt.Errorf("site app %q: %w", id, err)
-	}
-	if !site.IsEnabled() {
+	if !policy.IsEnabled() {
 		return nil, nil
 	}
 
@@ -238,7 +319,7 @@ func (l *Library) loadOne(path, id string, old *snapshot) (*Entry, error) {
 	// interval, for nothing.
 	stamp := stampOf(info)
 	if prev, ok := old.byID[id]; ok && prev.bundle.stamp == stamp && prev.App.Digest == expected {
-		app, err := Merge(id, prev.bundle.Manifest, site)
+		app, err := Merge(id, prev.bundle.Manifest, policy)
 		if err != nil {
 			return nil, err
 		}
@@ -250,7 +331,7 @@ func (l *Library) loadOne(path, id string, old *snapshot) (*Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("site app %q: %w", id, err)
 	}
-	app, err := Merge(id, bundle.Manifest, site)
+	app, err := Merge(id, bundle.Manifest, policy)
 	if err != nil {
 		_ = bundle.Close()
 		return nil, err
@@ -329,3 +410,65 @@ func (l *Library) Close() error {
 }
 
 var _ io.Closer = (*Library)(nil)
+
+// quoteAll renders ids for a message listing more than one.
+func quoteAll(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = strconv.Quote(id)
+	}
+	return out
+}
+
+// record notes the published set in the audit trail.
+func (l *Library) record(next *snapshot, now time.Time) error {
+	rec := l.recorder()
+	if rec == nil {
+		return nil
+	}
+	apps := make([]Incarnation, 0, len(next.byID))
+	for _, id := range next.order {
+		e := next.byID[id]
+		kind := "zip"
+		if e.bundle.ContentDigest == "" {
+			kind = "directory"
+		}
+		apps = append(apps, Incarnation{
+			AppID:       e.App.ID,
+			Digest:      e.bundle.ContentDigest,
+			BundleKind:  kind,
+			SizeBytes:   e.bundle.SizeBytes,
+			DigestKnown: e.App.Digest != "",
+			Version:     e.App.Version,
+			Revision:    e.App.Revision,
+			Name:        e.App.Name,
+			Description: e.App.Description,
+			Icon:        e.App.Icon,
+			Groups:      e.App.Groups,
+			Home:        e.App.Home,
+			Origin:      e.App.Origin,
+		})
+	}
+	// Bounded so a wedged database cannot hold the reload goroutine,
+	// which is also the one that would otherwise pick up the next
+	// bundle an operator drops.
+	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+	defer cancel()
+	return rec.Observe(ctx, now, apps)
+}
+
+// SetRecorder installs the audit recorder. nil records nothing.
+func (l *Library) SetRecorder(r Recorder) {
+	if r == nil {
+		l.rec.Store(nil)
+		return
+	}
+	l.rec.Store(&r)
+}
+
+func (l *Library) recorder() Recorder {
+	if r := l.rec.Load(); r != nil {
+		return *r
+	}
+	return nil
+}

@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
 )
 
 // siteAppBundle writes a minimal bundle and its policy file.
@@ -36,9 +39,57 @@ func siteAppBundle(t *testing.T, dir, id, name, groups string) {
 	if err := os.WriteFile(filepath.Join(dir, id+".zip"), buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, id+".yaml"), []byte("groups: ["+groups+"]\n"), 0o600); err != nil {
+	publishSiteApp(t, dir, id, groups)
+}
+
+// policyFile is the configuration fragment a test's bundles are
+// published by. It lives in the bundle directory, which the library
+// ignores -- only .zip files and directories are bundles -- so one
+// temporary directory holds the whole fixture.
+const policyFile = "siteapps.conf"
+
+// publishSiteApp adds the configuration that publishes an app to
+// groups, as an operator would write it.
+func publishSiteApp(t *testing.T, dir, id, groups string) {
+	t.Helper()
+	// The callers spell group lists the way the old policy file did,
+	// as a YAML-ish list body: `smith_lab` or `"*"`. Strip the quoting
+	// and let the configuration's own comma-separated form carry it.
+	groups = strings.ReplaceAll(groups, `"`, "")
+	line := siteapps.ConfigKey(id, "GROUPS") + " = " + groups + "\n"
+	//nolint:gosec // G304: the test's own temporary directory
+	f, err := os.OpenFile(filepath.Join(dir, policyFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open policy: %v", err)
+	}
+	if _, err := f.WriteString(line); err != nil {
+		_ = f.Close()
 		t.Fatalf("write policy: %v", err)
 	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close policy: %v", err)
+	}
+}
+
+// siteAppParams reads the fixture's configuration, or an empty one
+// when no app has been published.
+func siteAppParams(t *testing.T, dir string) *config.Config {
+	t.Helper()
+	if dir == "" {
+		return config.NewEmpty()
+	}
+	data, err := os.ReadFile(filepath.Join(dir, policyFile)) //nolint:gosec // the test's own temporary directory
+	if err != nil {
+		if os.IsNotExist(err) {
+			return config.NewEmpty()
+		}
+		t.Fatalf("read policy: %v", err)
+	}
+	cfg, err := config.NewFromReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("parse policy: %v", err)
+	}
+	return cfg
 }
 
 func siteAppServer(t *testing.T, dir string) *Handler {
@@ -49,6 +100,9 @@ func siteAppServer(t *testing.T, dir string) *Handler {
 		Logger:       testLogger(t),
 		OAuth2DBPath: t.TempDir() + "/sessions.db",
 		SiteAppsDir:  dir,
+		// Policy comes from the configuration, as it does in a real
+		// deployment; the fixture wrote it as a config fragment.
+		HTCondorConfig: siteAppParams(t, dir),
 	})
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

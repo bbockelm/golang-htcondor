@@ -43,7 +43,11 @@ func (f *fakeTarget) SetWebUICustomCSS(v string)     { f.record("webui_custom_cs
 func (f *fakeTarget) SetWebUIFavicon(v string)       { f.record("webui_favicon", v) }
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
-func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+
+// SetSiteAppPolicy records that the whole policy was re-read, which is
+// what a reconfigure does with it; there is no single value to record.
+func (f *fakeTarget) SetSiteAppPolicy(*config.Config) { f.record("site_app_policy", "reread") }
+func (f *fakeTarget) SetMCPDisabledTools(v string)    { f.record("disabled_tools", v) }
 
 func (f *fakeTarget) SetMCPRedactSecrets(v string)       { f.record("redact_secrets", v) }
 func (f *fakeTarget) SetMCPRedactDisabledRules(v string) { f.record("redact_disabled_rules", v) }

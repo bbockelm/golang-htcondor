@@ -14,23 +14,27 @@ import (
 // operator must be told. Failing silently here is how a lab's app ends
 // up either invisible with no explanation or, worse, published by a
 // future default.
-func TestNoPolicyFileIsNotPublished(t *testing.T) {
+func TestUnconfiguredBundleIsNotPublished(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	// deliberately no policy file
+	// deliberately not named by any configuration
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
 	if published != 0 {
-		t.Fatalf("published %d apps without a policy file", published)
+		t.Fatalf("published %d apps that no configuration names", published)
 	}
 	if len(problems) != 1 {
-		t.Fatalf("problems = %d, want exactly one explaining the missing policy file", len(problems))
+		t.Fatalf("problems = %d, want exactly one explaining the missing policy", len(problems))
 	}
-	if msg := problems[0].Error(); !strings.Contains(msg, "cryoem.yaml") {
-		t.Errorf("problem does not name the file to write: %v", msg)
+	// The message has to carry the parameter to set. An operator who
+	// is told only that something is missing has to go and find out
+	// what to write.
+	if msg := problems[0].Error(); !strings.Contains(msg, "HTTP_API_SITE_APP_CRYOEM_GROUPS") {
+		t.Errorf("problem does not name the parameter to set: %v", msg)
 	}
 	if _, ok := lib.Get("cryoem"); ok {
 		t.Error("the app is reachable despite not being published")
@@ -41,10 +45,11 @@ func TestNoPolicyFileIsNotPublished(t *testing.T) {
 // missing policy file, which is a mistake.
 func TestDisabledIsSilent(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [lab]\nenabled: false\n")
+	setPolicy(cfg, "cryoem", "lab", "ENABLED", "false")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -58,10 +63,11 @@ func TestDisabledIsSilent(t *testing.T) {
 
 func TestLoadAndServe(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [smith_lab]\nhome: true\n")
+	setPolicy(cfg, "cryoem", "smith_lab", "HOME", "true")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -95,10 +101,11 @@ func TestLoadAndServe(t *testing.T) {
 // policy-adjacent metadata must never be fetchable over HTTP.
 func TestManifestIsNotServable(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -114,10 +121,11 @@ func TestManifestIsNotServable(t *testing.T) {
 
 func TestBundleWithoutIndexIsRefused(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{"web/other.html": "x"})
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -131,14 +139,15 @@ func TestBundleWithoutIndexIsRefused(t *testing.T) {
 // the only thing that does.
 func TestDigestMismatchRefuses(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	path := writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 	writeDigest(t, path)
 
 	// Rewrite the bundle so the recorded digest no longer matches.
 	writeBundle(t, dir, "cryoem", "name: Tampered\n", defaultFiles())
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -152,11 +161,12 @@ func TestDigestMismatchRefuses(t *testing.T) {
 
 func TestDigestMatchPublishes(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	path := writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 	writeDigest(t, path)
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -173,10 +183,11 @@ func TestDigestMatchPublishes(t *testing.T) {
 // the OLD bundle's file handle must be released.
 func TestReloadPicksUpAReplacedBundle(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", "name: First\n", defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -212,14 +223,15 @@ func TestReloadPicksUpAReplacedBundle(t *testing.T) {
 // intact, not get a truncated body or "file already closed".
 func TestInFlightReadSurvivesARedeploy(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	body := strings.Repeat("x", 200_000)
 	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{
 		"web/index.html":    "<html></html>",
 		"web/assets/big.js": body,
 	})
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -262,10 +274,11 @@ func TestInFlightReadSurvivesARedeploy(t *testing.T) {
 // accumulates descriptors on unlinked files until it runs out.
 func TestRetiredBundlesAreClosedAfterTheGracePeriod(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	lib.retireGrace = time.Nanosecond // expire immediately
 	if _, problems := lib.Reload(); len(problems) != 0 {
@@ -299,10 +312,11 @@ func TestRetiredBundlesAreClosedAfterTheGracePeriod(t *testing.T) {
 // of them for nothing.
 func TestReloadReusesUnchangedBundles(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -327,10 +341,11 @@ func TestReloadReusesUnchangedBundles(t *testing.T) {
 // bytes have not moved.
 func TestReloadPicksUpAPolicyChange(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [smith_lab]\n")
+	setPolicy(cfg, "cryoem", "smith_lab")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -339,7 +354,7 @@ func TestReloadPicksUpAPolicyChange(t *testing.T) {
 		t.Fatal("jones_lab can already see an app scoped to smith_lab")
 	}
 
-	writePolicy(t, dir, "cryoem", "groups: [smith_lab, jones_lab]\n")
+	setPolicy(cfg, "cryoem", "smith_lab, jones_lab")
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
 	}
@@ -350,14 +365,15 @@ func TestReloadPicksUpAPolicyChange(t *testing.T) {
 
 func TestVisibleToAndHomes(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", "name: CryoEM\n", defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [smith_lab]\nhome: true\n")
+	setPolicy(cfg, "cryoem", "smith_lab", "HOME", "true")
 	writeBundle(t, dir, "seqqc", "name: SeqQC\n", defaultFiles())
-	writePolicy(t, dir, "seqqc", "groups: [jones_lab]\nhome: true\n")
+	setPolicy(cfg, "seqqc", "jones_lab", "HOME", "true")
 	writeBundle(t, dir, "shared", "name: Shared\n", defaultFiles())
-	writePolicy(t, dir, "shared", "groups: [\"*\"]\n")
+	setPolicy(cfg, "shared", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	published, problems := lib.Reload()
 	if published != 3 || len(problems) != 0 {
@@ -397,12 +413,13 @@ func TestVisibleToAndHomes(t *testing.T) {
 // deploying app B should not take app A down with a typo.
 func TestOneBadBundleDoesNotStopTheRest(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "good", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "good", "groups: [\"*\"]\n")
+	setPolicy(cfg, "good", "*")
 	writeBundle(t, dir, "bad", "this: is not a manifest\n", defaultFiles())
-	writePolicy(t, dir, "bad", "groups: [\"*\"]\n")
+	setPolicy(cfg, "bad", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -421,10 +438,11 @@ func TestOneBadBundleDoesNotStopTheRest(t *testing.T) {
 // shell script every app depends on.
 func TestReservedIDRefused(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "_shell", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "_shell", "groups: [\"*\"]\n")
+	setPolicy(cfg, "_shell", "*")
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -436,7 +454,7 @@ func TestReservedIDRefused(t *testing.T) {
 // A missing directory is an operator misconfiguration, reported once,
 // not a crash.
 func TestMissingDirectoryReportsAProblem(t *testing.T) {
-	lib := NewLibrary(filepath.Join(t.TempDir(), "nope"))
+	lib := NewLibrary(filepath.Join(t.TempDir(), "nope"), NewConfigPolicy(newTestParams()))
 	t.Cleanup(func() { _ = lib.Close() })
 	published, problems := lib.Reload()
 	if published != 0 || len(problems) != 1 {
@@ -446,7 +464,7 @@ func TestMissingDirectoryReportsAProblem(t *testing.T) {
 
 // An unset directory disables the feature; it is not an error.
 func TestEmptyDirectoryConfigIsNotAnError(t *testing.T) {
-	lib := NewLibrary("")
+	lib := NewLibrary("", NewConfigPolicy(newTestParams()))
 	t.Cleanup(func() { _ = lib.Close() })
 	if published, problems := lib.Reload(); published != 0 || len(problems) != 0 {
 		t.Fatalf("published=%d problems=%v", published, problems)

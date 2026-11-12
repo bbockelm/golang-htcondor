@@ -12,9 +12,9 @@ import (
 
 // testHandler builds a library from dir and wraps it, with the caller
 // holding the given groups.
-func testHandler(t *testing.T, dir string, authenticated bool, groups ...string) *Handler {
+func testHandler(t *testing.T, dir string, cfg *testParams, authenticated bool, groups ...string) *Handler {
 	t.Helper()
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	if _, problems := lib.Reload(); len(problems) != 0 {
 		t.Fatalf("problems: %v", problems)
@@ -37,22 +37,23 @@ func get(h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func twoAppDir(t *testing.T) string {
+func twoAppDir(t *testing.T) (string, *testParams) {
 	t.Helper()
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", "name: CryoEM Pipeline\n", map[string]string{
 		"web/index.html":      "<html><head></head><body>cryoem</body></html>",
 		"web/assets/app.js":   "// smith lab secrets",
 		"web/deep/nested.css": "body{}",
 	})
-	writePolicy(t, dir, "cryoem", "groups: [smith_lab]\n")
+	setPolicy(cfg, "cryoem", "smith_lab")
 	writeBundle(t, dir, "seqqc", "name: SeqQC\n", defaultFiles())
-	writePolicy(t, dir, "seqqc", "groups: [jones_lab]\n")
-	return dir
+	setPolicy(cfg, "seqqc", "jones_lab")
+	return dir, cfg
 }
 
 func TestMemberGetsTheApp(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/cryoem/")
 	if rec.Code != http.StatusOK {
@@ -68,7 +69,7 @@ func TestMemberGetsTheApp(t *testing.T) {
 // which is where the pipeline names and parameters live -- to anyone
 // who asks.
 func TestNonMemberIsRefusedOnNestedAssetsToo(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "jones_lab")
+	h := twoAppHandler(t, true, "jones_lab")
 
 	for _, path := range []string{
 		"/site/cryoem/",
@@ -90,7 +91,7 @@ func TestNonMemberIsRefusedOnNestedAssetsToo(t *testing.T) {
 // 404 rather than 403: the set of app ids is site information and a
 // 403 confirms which exist.
 func TestNonMemberCannotDistinguishMissingFromForbidden(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "nobody")
+	h := twoAppHandler(t, true, "nobody")
 
 	existing := get(h, "/site/cryoem/")
 	missing := get(h, "/site/doesnotexist/")
@@ -106,7 +107,7 @@ func TestNonMemberCannotDistinguishMissingFromForbidden(t *testing.T) {
 // Not logged in is a different situation from not permitted: send the
 // browser to log in rather than a 404 they would read as a broken link.
 func TestUnauthenticatedIsSentToLogin(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), false)
+	h := twoAppHandler(t, false)
 
 	rec := get(h, "/site/cryoem/assets/app.js")
 	if rec.Code != http.StatusFound {
@@ -122,7 +123,7 @@ func TestUnauthenticatedIsSentToLogin(t *testing.T) {
 
 // Group-scoped bytes must not land in a shared cache.
 func TestResponsesArePrivateAndUncached(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	for _, path := range []string{"/site/cryoem/", "/site/cryoem/assets/app.js"} {
 		rec := get(h, path)
@@ -139,7 +140,7 @@ func TestResponsesArePrivateAndUncached(t *testing.T) {
 // The bundle learns its mount point from the server, which is what
 // lets the same artifact be deployed under a different file name.
 func TestPagesAreToldTheirMountPoint(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/cryoem/")
 	body := rec.Body.String()
@@ -169,7 +170,7 @@ func TestPagesAreToldTheirMountPoint(t *testing.T) {
 
 // Assets must not be injected into, and must come back byte-exact.
 func TestAssetsAreNotInjected(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/cryoem/assets/app.js")
 	if body := rec.Body.String(); body != "// smith lab secrets" {
@@ -180,7 +181,7 @@ func TestAssetsAreNotInjected(t *testing.T) {
 // Client-side routes fall back to index.html, still inside the gate
 // and still injected.
 func TestClientSideRouteFallsBackToIndex(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/cryoem/jobs/12345")
 	if rec.Code != http.StatusOK {
@@ -195,7 +196,7 @@ func TestClientSideRouteFallsBackToIndex(t *testing.T) {
 // A caller in both labs reaches both apps; each app still refuses the
 // other's members.
 func TestMultipleGroupsReachMultipleApps(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab", "jones_lab")
+	h := twoAppHandler(t, true, "smith_lab", "jones_lab")
 
 	for _, path := range []string{"/site/cryoem/", "/site/seqqc/"} {
 		if rec := get(h, path); rec.Code != http.StatusOK {
@@ -208,7 +209,7 @@ func TestMultipleGroupsReachMultipleApps(t *testing.T) {
 // 404 rather than falling through to an app, and no bundle can claim
 // one because ValidateID refuses an id beginning with "_".
 func TestReservedPrefixIsNotAnApp(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 	for _, path := range []string{"/site/_switch", "/site/_nothing/here"} {
 		if rec := get(h, path); rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404", path, rec.Code)
@@ -217,7 +218,7 @@ func TestReservedPrefixIsNotAnApp(t *testing.T) {
 }
 
 func TestShellScriptIsServed(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/_shell.js")
 	if rec.Code != http.StatusOK {
@@ -246,7 +247,7 @@ func TestShellScriptIsServed(t *testing.T) {
 // A subresource must not be answered with a redirect to a login page:
 // the browser would parse HTML as JavaScript.
 func TestShellScriptWithoutASessionIsNotARedirect(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), false)
+	h := twoAppHandler(t, false)
 
 	rec := get(h, "/site/_shell.js")
 	if rec.Code == http.StatusFound || rec.Code == http.StatusMovedPermanently {
@@ -260,7 +261,7 @@ func TestShellScriptWithoutASessionIsNotARedirect(t *testing.T) {
 // Every page carries the overlay tag, so a user is never stranded in
 // an app with no way across or out.
 func TestPagesCarryTheShellTag(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	for _, path := range []string{"/site/cryoem/", "/site/cryoem/some/client/route"} {
 		body := get(h, path).Body.String()
@@ -276,7 +277,7 @@ func TestPagesCarryTheShellTag(t *testing.T) {
 // A path that escapes the mount point must not reach another app or
 // the filesystem.
 func TestPathEscapesAreRefused(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	for _, path := range []string{
 		"/site/cryoem/../seqqc/index.html",
@@ -293,7 +294,7 @@ func TestPathEscapesAreRefused(t *testing.T) {
 // can paste into a lab wiki: the same URL sends each person to their
 // own set.
 func TestSwitcherListsOnlyTheCallersApps(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 
 	rec := get(h, "/site/")
 	if rec.Code != http.StatusOK {
@@ -316,7 +317,7 @@ func TestSwitcherListsOnlyTheCallersApps(t *testing.T) {
 // Somebody in two labs sees both, which is the state the switcher
 // exists for.
 func TestSwitcherShowsEveryVisibleApp(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab", "jones_lab")
+	h := twoAppHandler(t, true, "smith_lab", "jones_lab")
 
 	body := get(h, "/site/").Body.String()
 	for _, want := range []string{"CryoEM Pipeline", "SeqQC"} {
@@ -329,7 +330,7 @@ func TestSwitcherShowsEveryVisibleApp(t *testing.T) {
 // A caller with no apps gets a page that says so and offers a way
 // onward, not a 404 and not a blank list.
 func TestSwitcherWithNoAppsStillOffersAWayOnward(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "nobody")
+	h := twoAppHandler(t, true, "nobody")
 
 	rec := get(h, "/site/")
 	if rec.Code != http.StatusOK {
@@ -345,7 +346,7 @@ func TestSwitcherWithNoAppsStillOffersAWayOnward(t *testing.T) {
 }
 
 func TestSwitcherRequiresASession(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), false)
+	h := twoAppHandler(t, false)
 
 	rec := get(h, "/site/")
 	if rec.Code != http.StatusFound {
@@ -357,9 +358,10 @@ func TestSwitcherRequiresASession(t *testing.T) {
 // not safe input. A name carrying markup must not become markup.
 func TestSwitcherEscapesAppNames(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "evil", "name: \"<script>alert(1)</script>\"\n", defaultFiles())
-	writePolicy(t, dir, "evil", "groups: [\"*\"]\n")
-	h := testHandler(t, dir, true, "anyone")
+	setPolicy(cfg, "evil", "*")
+	h := testHandler(t, dir, cfg, true, "anyone")
 
 	body := get(h, "/site/").Body.String()
 	if strings.Contains(body, "<script>alert(1)</script>") {
@@ -375,7 +377,7 @@ func TestSwitcherEscapesAppNames(t *testing.T) {
 // catches the two ways the earlier version was wrong without needing
 // one.
 func TestShellClearsItselfFromTheComputedPadding(t *testing.T) {
-	h := testHandler(t, twoAppDir(t), true, "smith_lab")
+	h := twoAppHandler(t, true, "smith_lab")
 	js := get(h, "/site/_shell.js").Body.String()
 
 	// It must read the COMPUTED padding. Checking only the inline
@@ -393,4 +395,12 @@ func TestShellClearsItselfFromTheComputedPadding(t *testing.T) {
 	if n := strings.Count(js, "36"); n != 1 {
 		t.Errorf("the bar height appears %d times; it should be defined once and referenced", n)
 	}
+}
+
+// twoAppHandler serves the two-app directory to a caller holding the
+// given groups.
+func twoAppHandler(t *testing.T, authenticated bool, groups ...string) *Handler {
+	t.Helper()
+	dir, cfg := twoAppDir(t)
+	return testHandler(t, dir, cfg, authenticated, groups...)
 }

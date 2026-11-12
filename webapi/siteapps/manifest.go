@@ -40,34 +40,25 @@ import (
 // BundleManifest is app.yaml INSIDE the bundle, written by the app's
 // author. It describes what the app is.
 //
-// It deliberately has no Groups field and no ID. See SiteManifest for
-// groups; the id comes from the bundle's file name.
+// It deliberately has no Groups field and no ID. Who may see an app is
+// the site's decision, made in the site's configuration (see Policy);
+// the id comes from the bundle's file name.
 type BundleManifest struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	Icon        string `yaml:"icon"`
-}
-
-// SiteManifest is <id>.yaml BESIDE the bundle, written by the
-// operator. It decides what the app is allowed to be.
-//
-// Pointer fields distinguish "the operator wrote false" from "the
-// operator wrote nothing", which matters for Enabled: the zero value
-// of a bool would make every manifest that omits it mean "disabled".
-type SiteManifest struct {
-	// Groups may see the app. "*" means every authenticated user.
+	// Version and Revision are the author's own labels for this build
+	// -- a release number and whatever identifies the source it came
+	// from, typically a git describe or commit. Both are free-form and
+	// both are optional: an older bundle has neither.
 	//
-	// Operator-only and required: see Merge.
-	Groups []string `yaml:"groups"`
-	// Home sends members here instead of the dashboard.
-	Home *bool `yaml:"home"`
-	// Enabled defaults to true when absent.
-	Enabled *bool `yaml:"enabled"`
-	// Name and Description override the bundle's, for a site that wants
-	// to call an app something else in its own users' terms.
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
-	Icon        string `yaml:"icon"`
+	// Nothing in the server reads them. They exist to be recorded, so
+	// that "which build of this app was running in October?" is
+	// answerable from the audit trail without having kept the
+	// artifacts. A digest identifies a build uniquely but tells a
+	// human nothing.
+	Version  string `yaml:"version"`
+	Revision string `yaml:"revision"`
 }
 
 // App is one loaded, publishable site app.
@@ -80,6 +71,14 @@ type App struct {
 	Icon        string
 	Groups      []string
 	Home        bool
+	// Version and Revision are the bundle's own labels, carried
+	// through for the audit trail.
+	Version  string
+	Revision string
+	// Origin names where the policy that published this app came
+	// from, for the audit trail and for an administrator asking why
+	// an app is visible.
+	Origin string
 	// Digest is the bundle's SHA-256, when a .sha256 sidecar was
 	// present and verified. Empty when the bundle was loaded
 	// unverified or is a directory.
@@ -109,39 +108,38 @@ const wildcardGroup = "*"
 // names no groups is far more likely to be a mistake than a deliberate
 // request to publish an app to no one, and failing loudly at load is
 // how the operator finds out.
-func Merge(id string, bundle BundleManifest, site SiteManifest) (App, error) {
+func Merge(id string, bundle BundleManifest, policy Policy) (App, error) {
 	if err := ValidateID(id); err != nil {
 		return App{}, err
 	}
 
-	groups := make([]string, 0, len(site.Groups))
-	for _, g := range site.Groups {
+	groups := make([]string, 0, len(policy.Groups))
+	for _, g := range policy.Groups {
 		if g = strings.TrimSpace(g); g != "" {
 			groups = append(groups, g)
 		}
 	}
 	if len(groups) == 0 {
-		return App{}, fmt.Errorf("site app %q: its policy file names no groups; "+
-			"write groups: [\"*\"] to publish it to every authenticated user", id)
+		return App{}, fmt.Errorf("site app %q: %s names no groups; set it to the groups "+
+			"that may see the app, or to * for every authenticated user",
+			id, firstNonEmpty(policy.Origin, ConfigKey(id, "GROUPS")))
 	}
 
 	app := App{
 		ID:          id,
-		Name:        firstNonEmpty(site.Name, bundle.Name, id),
-		Description: firstNonEmpty(site.Description, bundle.Description),
-		Icon:        firstNonEmpty(site.Icon, bundle.Icon),
+		Name:        firstNonEmpty(policy.Name, bundle.Name, id),
+		Description: firstNonEmpty(policy.Description, bundle.Description),
+		Icon:        firstNonEmpty(policy.Icon, bundle.Icon),
 		Groups:      groups,
+		Version:     strings.TrimSpace(bundle.Version),
+		Revision:    strings.TrimSpace(bundle.Revision),
+		Origin:      policy.Origin,
 	}
-	if site.Home != nil {
-		app.Home = *site.Home
+	if policy.Home != nil {
+		app.Home = *policy.Home
 	}
 	return app, nil
 }
-
-// IsEnabled reports whether the site manifest publishes the app. Absent
-// means enabled: an operator who wrote a policy file at all meant to
-// publish the app, and should not have to say so twice.
-func (s SiteManifest) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
 // VisibleTo reports whether a caller holding these groups may see the
 // app.
@@ -180,26 +178,12 @@ func ParseBundleManifest(data []byte) (BundleManifest, error) {
 		// gets an error about what is missing, rather than "EOF".
 		if strings.Contains(err.Error(), "field groups not found") {
 			return BundleManifest{}, fmt.Errorf("app.yaml names groups, which a bundle cannot set: "+
-				"who may see an app is the site's decision, written in its policy file beside the bundle (%w)", err)
+				"who may see an app is the site's decision, made in the site's configuration (%w)", err)
 		}
 		return BundleManifest{}, fmt.Errorf("app.yaml: %w", err)
 	}
 	if strings.TrimSpace(m.Name) == "" {
 		return BundleManifest{}, fmt.Errorf("app.yaml names no app")
-	}
-	return m, nil
-}
-
-// ParseSiteManifest reads the operator's <id>.yaml.
-func ParseSiteManifest(data []byte) (SiteManifest, error) {
-	var m SiteManifest
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	dec.KnownFields(true)
-	// io.EOF means the file is empty. That is a policy file naming no
-	// groups, which Merge refuses with a message saying what to write
-	// -- a better answer for `touch cryoem.yaml` than "EOF".
-	if err := dec.Decode(&m); err != nil && !errors.Is(err, io.EOF) {
-		return SiteManifest{}, fmt.Errorf("policy file: %w", err)
 	}
 	return m, nil
 }

@@ -15,7 +15,7 @@ func TestBundleManifestRefusesGroups(t *testing.T) {
 	}
 	// The error has to explain where groups DO go, or the author just
 	// deletes the key and still does not know how to scope their app.
-	if !strings.Contains(err.Error(), "policy file") {
+	if !strings.Contains(err.Error(), "configuration") {
 		t.Errorf("error does not say where groups belong: %v", err)
 	}
 }
@@ -29,25 +29,25 @@ func TestBundleManifestRequiresName(t *testing.T) {
 // An empty groups list is a mistake, not a request to publish to
 // nobody, and has to be refused loudly at load.
 func TestMergeRefusesEmptyGroups(t *testing.T) {
-	for _, policy := range []string{"", "groups: []\n", "groups: [\"\", \"  \"]\n"} {
-		site, err := ParseSiteManifest([]byte(policy))
-		if err != nil {
-			t.Fatalf("parse %q: %v", policy, err)
-		}
-		if _, err := Merge("app", BundleManifest{Name: "X"}, site); err == nil {
-			t.Errorf("policy %q published the app with no groups", policy)
+	// A policy naming no groups is a mistake far more often than it is
+	// a deliberate request to publish an app to nobody, so it fails at
+	// load rather than publishing something invisible.
+	for _, groups := range [][]string{nil, {}, {"", "  "}} {
+		if _, err := Merge("app", BundleManifest{Name: "X"}, Policy{Groups: groups}); err == nil {
+			t.Errorf("groups %q published the app with no groups", groups)
 		}
 	}
 }
 
-func TestMergeSiteOverridesBundle(t *testing.T) {
-	site, err := ParseSiteManifest([]byte("groups: [lab]\nname: Site Name\nhome: true\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+func TestMergePolicyOverridesBundle(t *testing.T) {
+	home := true
+	policy := Policy{Groups: []string{"lab"}, Name: "Site Name", Home: &home, Origin: "HTTP_API_SITE_APP_CRYOEM_GROUPS"}
+	bundle := BundleManifest{
+		Name: "Bundle Name", Description: "from the bundle", Icon: "beaker",
+		Version: "2.1.0", Revision: "abc1234",
 	}
-	bundle := BundleManifest{Name: "Bundle Name", Description: "from the bundle", Icon: "beaker"}
 
-	app, err := Merge("cryoem", bundle, site)
+	app, err := Merge("cryoem", bundle, policy)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -68,21 +68,30 @@ func TestMergeSiteOverridesBundle(t *testing.T) {
 	if app.ID != "cryoem" {
 		t.Errorf("ID = %q, want cryoem", app.ID)
 	}
+	// The build labels are the bundle's alone -- a site does not get to
+	// restate which build it is running.
+	if app.Version != "2.1.0" || app.Revision != "abc1234" {
+		t.Errorf("Version/Revision = %q/%q, want the bundle's", app.Version, app.Revision)
+	}
+	if app.Origin != policy.Origin {
+		t.Errorf("Origin = %q, want %q", app.Origin, policy.Origin)
+	}
 }
 
 func TestIsEnabledDefaultsTrue(t *testing.T) {
-	cases := map[string]bool{
-		"groups: [lab]\n":                 true,
-		"groups: [lab]\nenabled: true\n":  true,
-		"groups: [lab]\nenabled: false\n": false,
+	yes, no := true, false
+	cases := []struct {
+		name string
+		p    Policy
+		want bool
+	}{
+		{"unset", Policy{}, true},
+		{"true", Policy{Enabled: &yes}, true},
+		{"false", Policy{Enabled: &no}, false},
 	}
-	for policy, want := range cases {
-		site, err := ParseSiteManifest([]byte(policy))
-		if err != nil {
-			t.Fatalf("parse %q: %v", policy, err)
-		}
-		if got := site.IsEnabled(); got != want {
-			t.Errorf("IsEnabled(%q) = %v, want %v", policy, got, want)
+	for _, c := range cases {
+		if got := c.p.IsEnabled(); got != c.want {
+			t.Errorf("IsEnabled(%s) = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

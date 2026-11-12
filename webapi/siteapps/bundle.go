@@ -26,7 +26,7 @@ const (
 	// chose to ship, small enough that one entry cannot be the whole
 	// budget by accident.
 	maxEntryBytes = 128 << 20 // 128 MiB
-	// maxManifestBytes bounds app.yaml and the policy file. These are a
+	// maxManifestBytes bounds app.yaml. It is a
 	// handful of keys.
 	maxManifestBytes = 64 << 10
 )
@@ -51,8 +51,16 @@ type Bundle struct {
 	// Manifest is app.yaml from inside the bundle.
 	Manifest BundleManifest
 	// Digest is the verified SHA-256 of the zip, or "" for a directory
-	// bundle or an unverified zip.
+	// bundle or an unverified zip. Non-empty means a .sha256 sidecar
+	// was present and matched, which is a stronger statement than
+	// ContentDigest makes and is why the two are separate.
 	Digest string
+	// ContentDigest is the SHA-256 of the zip as found, attested or
+	// not. Empty for a directory bundle, which is a tree rather than a
+	// set of bytes.
+	ContentDigest string
+	// SizeBytes is the bundle file's size; 0 for a directory bundle.
+	SizeBytes int64
 
 	// closer releases the underlying zip file. nil for a directory.
 	closer io.Closer
@@ -144,11 +152,16 @@ func openDirBundle(path string, info os.FileInfo) (*Bundle, error) {
 }
 
 func openZipBundle(path string, info os.FileInfo, expectedDigest string) (*Bundle, error) {
+	// Hashed whether or not there is a .sha256 to check it against:
+	// the digest is the artifact's identity, and the audit trail needs
+	// one for every bundle, not only for the attested ones. This runs
+	// when a bundle is opened, which a rescan skips for a file that
+	// has not moved, so it is not an every-interval cost.
+	actual, err := digestFile(path)
+	if err != nil {
+		return nil, err
+	}
 	if expectedDigest != "" {
-		actual, err := digestFile(path)
-		if err != nil {
-			return nil, err
-		}
 		if !strings.EqualFold(actual, expectedDigest) {
 			return nil, fmt.Errorf("bundle digest mismatch: the file on disk hashes to %s "+
 				"but its .sha256 says %s; it is not the bundle that was built", actual, expectedDigest)
@@ -204,11 +217,13 @@ func openZipBundle(path string, info os.FileInfo, expectedDigest string) (*Bundl
 	}
 
 	return &Bundle{
-		FS:       web,
-		Manifest: manifest,
-		Digest:   expectedDigest,
-		closer:   backing,
-		stamp:    stampOf(info),
+		FS:            web,
+		Manifest:      manifest,
+		Digest:        expectedDigest,
+		ContentDigest: actual,
+		SizeBytes:     info.Size(),
+		closer:        backing,
+		stamp:         stampOf(info),
 	}, nil
 }
 

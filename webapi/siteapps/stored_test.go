@@ -27,10 +27,10 @@ func dirNames(t *testing.T, dir string) []string {
 }
 
 // loadOneApp publishes the single bundle in dir and returns it.
-func loadOneApp(t *testing.T, dir string) *Entry {
+func loadOneApp(t *testing.T, dir string, cfg *testParams) *Entry {
 	t.Helper()
 	const id = "cryoem"
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 	published, problems := lib.Reload()
 	if len(problems) != 0 {
@@ -51,14 +51,15 @@ func loadOneApp(t *testing.T, dir string) *Entry {
 // This is the property the whole normalization step exists for.
 func TestServedFilesAreSeekable(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	body := strings.Repeat("abcdefghij", 500) // compressible, so it WILL be deflated
 	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{
 		"web/index.html":    "<html></html>",
 		"web/assets/big.js": body,
 	})
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 
 	f, err := entry.FS().Open("assets/big.js")
 	if err != nil {
@@ -103,12 +104,13 @@ func TestServedFilesAreSeekable(t *testing.T) {
 // clean up and nothing for a rescan to trip over.
 func TestScratchFileIsNotLeftBehind(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{
 		"web/index.html": strings.Repeat("compress me ", 1000),
 	})
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 
 	for _, name := range dirNames(t, dir) {
 		if strings.HasPrefix(name, tempPrefix) || strings.HasSuffix(name, tempSuffix) {
@@ -127,6 +129,7 @@ func TestScratchFileIsNotLeftBehind(t *testing.T) {
 // original file, with no copy written at all.
 func TestStoredBundleIsNotRewritten(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 
 	// Build a bundle with every entry STORED, the way `zip -0` does.
 	var buf bytes.Buffer
@@ -149,9 +152,9 @@ func TestStoredBundleIsNotRewritten(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cryoem.zip"), buf.Bytes(), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 	if got := readFS(t, entry.FS(), "index.html"); !strings.Contains(got, "stored") {
 		t.Errorf("index.html = %q", got)
 	}
@@ -163,13 +166,14 @@ func TestStoredBundleIsNotRewritten(t *testing.T) {
 // synthesized.
 func TestParentDirectoriesAreSynthesized(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, map[string]string{
 		"web/index.html":         "<html></html>",
 		"web/jobs/_/detail.html": "<html>detail</html>",
 	})
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 	for _, d := range []string{".", "jobs", "jobs/_"} {
 		f, err := entry.FS().Open(d)
 		if err != nil {
@@ -190,10 +194,11 @@ func TestParentDirectoriesAreSynthesized(t *testing.T) {
 // the handler above it.
 func TestStoredFSRejectsInvalidPaths(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	writeBundle(t, dir, "cryoem", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 	for _, bad := range []string{"../app.yaml", "/index.html", "./index.html", ""} {
 		if _, err := entry.FS().Open(bad); err == nil {
 			t.Errorf("Open(%q) succeeded", bad)
@@ -210,17 +215,18 @@ func TestStoredFSRejectsInvalidPaths(t *testing.T) {
 // be loaded as a bundle.
 func TestHiddenAndScratchNamesAreNotLoaded(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	// A real app, so the library has something to publish.
 	writeBundle(t, dir, "good", defaultManifest, defaultFiles())
-	writePolicy(t, dir, "good", "groups: [\"*\"]\n")
+	setPolicy(cfg, "good", "*")
 
 	// Things that must be ignored outright, with policy files that
 	// would publish them if they ever were loaded.
 	writeBundle(t, dir, ".hidden", defaultManifest, defaultFiles())
-	writePolicy(t, dir, ".hidden", "groups: [\"*\"]\n")
+	setPolicy(cfg, ".hidden", "*")
 	writeBundle(t, dir, tempPrefix+"deadbeef"+tempSuffix, defaultManifest, defaultFiles())
 
-	lib := NewLibrary(dir)
+	lib := NewLibrary(dir, NewConfigPolicy(cfg))
 	t.Cleanup(func() { _ = lib.Close() })
 
 	published, problems := lib.Reload()
@@ -276,6 +282,7 @@ func writeDirBundle(t *testing.T, dir, id string, files map[string]string) strin
 // pointed at.
 func TestDirBundleDoesNotFollowSymlinksOut(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	secret := filepath.Join(dir, "secret.txt")
 	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
 		t.Fatalf("write secret: %v", err)
@@ -288,9 +295,9 @@ func TestDirBundleDoesNotFollowSymlinksOut(t *testing.T) {
 	if err := os.Symlink(secret, filepath.Join(root, "web", "escape.txt")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 
 	data, err := fs.ReadFile(entry.FS(), "escape.txt")
 	if err == nil {
@@ -307,6 +314,7 @@ func TestDirBundleDoesNotFollowSymlinksOut(t *testing.T) {
 // keep working, or unpacking a build output with internal links breaks.
 func TestDirBundleAllowsInternalSymlinks(t *testing.T) {
 	dir := t.TempDir()
+	cfg := newTestParams()
 	root := writeDirBundle(t, dir, "cryoem", map[string]string{
 		"app.yaml":           defaultManifest,
 		"web/index.html":     "<html></html>",
@@ -315,9 +323,9 @@ func TestDirBundleAllowsInternalSymlinks(t *testing.T) {
 	if err := os.Symlink("real.js", filepath.Join(root, "web", "assets", "link.js")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	writePolicy(t, dir, "cryoem", "groups: [\"*\"]\n")
+	setPolicy(cfg, "cryoem", "*")
 
-	entry := loadOneApp(t, dir)
+	entry := loadOneApp(t, dir, cfg)
 	if got, err := fs.ReadFile(entry.FS(), "assets/link.js"); err != nil {
 		t.Errorf("an internal symlink was refused: %v", err)
 	} else if string(got) != "console.log(1)" {
