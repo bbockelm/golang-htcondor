@@ -95,6 +95,17 @@ type AuthMeResponse struct {
 	// subsystem, so the SPA offers the admin page for it. Advisory: the
 	// endpoints refuse regardless when it is off.
 	Reservations bool `json:"reservations,omitempty"`
+	// Interactive names the built-in interactive applications this
+	// access point offers, in the order the Interactive page shows them:
+	// some of "jupyter", "vscode", "terminal". Empty means none, and the
+	// SPA then drops the Interactive item from its navigation -- an
+	// entry leading to three explanations of why nothing can be started
+	// is worse than no entry.
+	//
+	// Advisory, like the rest of this response: creating a session in an
+	// app this does not list is refused regardless of what the SPA does
+	// with it.
+	Interactive []string `json:"interactive,omitempty"`
 }
 
 // PlacementSessionInfo is the placement identity of a session.
@@ -183,6 +194,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// the same policy the collector reads go through, so the page and
 	// the data it renders cannot disagree about what is withheld.
 	resp.Reservations = s.reservationsEnabled
+	resp.Interactive = s.interactive.offered()
 	resp.PoolIdentityRestricted = s.poolQueryPolicy.Restricts(s.seesAllJobs(r.Context(), r, jobScopeRead))
 
 	s.writeJSON(w, http.StatusOK, resp)

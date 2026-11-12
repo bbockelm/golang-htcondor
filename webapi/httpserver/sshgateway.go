@@ -596,6 +596,16 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 		return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
 	}
 
+	// The third front door onto an interactive session, and the one
+	// easiest to forget: attaching to a session that exists is fine, but
+	// a site that does not offer terminals must not have one made for
+	// somebody because they typed `ssh`.
+	if !h.interactive.enabled(appTerminal) {
+		return jobssh.Key{}, fmt.Errorf(
+			"this access point does not offer terminal sessions (HTTP_API_INTERACTIVE_TERMINAL), so %q cannot be started; "+
+				"connect to a job you already have, as in 12345.0", name)
+	}
+
 	report(fmt.Sprintf("Submitting session %q", name))
 	info, err := mgr.Create(ctx, caller, interactive.CreateSpec{
 		Name:     name,

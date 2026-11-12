@@ -222,6 +222,18 @@ type Config struct {
 	// the admin page and the controller that holds pool capacity. Off
 	// unless configured, because it evicts other people's jobs.
 	Reservations bool
+	// InteractiveJupyterDisabled, InteractiveVSCodeDisabled and
+	// InteractiveTerminalDisabled withhold one of the three built-in
+	// interactive applications (HTTP_API_INTERACTIVE_JUPYTER,
+	// _VSCODE, _TERMINAL = false).
+	//
+	// Stated negatively so the zero value is the one every installation
+	// had before these existed: all three offered. A Config built
+	// without thinking about them -- in a test, or by a caller written
+	// earlier -- keeps serving what it served.
+	InteractiveJupyterDisabled  bool
+	InteractiveVSCodeDisabled   bool
+	InteractiveTerminalDisabled bool
 	// ReservationEPConstraint limits which execute points a reservation
 	// may draw seats from, as a ClassAd expression over the slot ad.
 	// Empty means every startd the collector reports.
@@ -573,6 +585,9 @@ func NewServer(cfg Config) (*Server, error) {
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,
 		InteractiveRequirements:     cfg.InteractiveRequirements,
+		InteractiveJupyterDisabled:  cfg.InteractiveJupyterDisabled,
+		InteractiveVSCodeDisabled:   cfg.InteractiveVSCodeDisabled,
+		InteractiveTerminalDisabled: cfg.InteractiveTerminalDisabled,
 		VSCodeImage:                 cfg.VSCodeImage,
 		Build:                       cfg.Build,
 		DBMirrorTokenSubject:        cfg.DBMirrorTokenSubject,

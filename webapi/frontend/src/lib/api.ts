@@ -200,6 +200,11 @@ export interface Session {
   // This server runs the reservation subsystem, so the admin page for
   // it is offered. Advisory: the endpoints refuse regardless when off.
   reservations?: boolean;
+  // The built-in interactive applications this access point offers, in
+  // the order the Interactive page shows them. Absent or empty means
+  // none, and the Interactive item leaves the navigation with them.
+  // Advisory: launching one it does not list is refused by the server.
+  interactive?: InteractiveApp[];
   // The site withholds who is running on a slot from this session.
   // Advisory: it decides what the pool pages ask for and what they say,
   // while the server enforces the rule on every collector read.
@@ -208,6 +213,9 @@ export interface Session {
   // tokens.
   placement?: PlacementSessionIdentity;
 }
+
+// The built-in interactive applications, as /auth/me names them.
+export type InteractiveApp = 'jupyter' | 'vscode' | 'terminal';
 
 export interface PlacementSessionIdentity {
   identity: string;

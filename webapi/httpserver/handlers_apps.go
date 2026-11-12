@@ -149,6 +149,13 @@ func (s *Handler) handleAppsPath(w http.ResponseWriter, r *http.Request) {
 	if rest == "" {
 		switch r.Method {
 		case http.MethodPost:
+			// As with JupyterLab: creation is refused, and everything
+			// that serves an app already running is not, so a site can
+			// stop offering VS Code without stranding the sessions
+			// somebody is working in.
+			if !s.requireInteractiveApp(w, appVSCode) {
+				return
+			}
 			s.handleAppCreate(w, r)
 		case http.MethodGet:
 			s.handleAppList(w, r)

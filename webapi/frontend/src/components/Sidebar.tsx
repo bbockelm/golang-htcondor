@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type SiteApp } from '@/lib/api';
+import { api, type InteractiveApp, type SiteApp } from '@/lib/api';
 import { useBranding } from '@/lib/branding';
 import { placementAdmin } from '@/lib/placementAdmin';
 import { CountBadge } from './CountBadge';
@@ -23,6 +23,12 @@ interface SidebarProps {
   // This server runs the reservation subsystem, so its admin page is
   // offered. Off unless configured.
   reservations?: boolean;
+  // The built-in interactive applications this access point offers. None
+  // of them, and the Interactive item goes: a link to a page that can
+  // only explain that nothing can be started is worse than no link. The
+  // page itself stays reachable if typed, the way every other collapsed
+  // item does, so a session still running can be found.
+  interactive?: InteractiveApp[];
   // Operator-deployed web apps this session may see. Server-filtered;
   // the sidebar renders what it is given and decides nothing.
   siteApps?: SiteApp[];
@@ -89,6 +95,7 @@ export function Sidebar({
   superuserActive,
   multiAP,
   reservations,
+  interactive,
   siteApps,
   appOnly,
   expertActive,
@@ -162,16 +169,26 @@ export function Sidebar({
               console in its navigation unless it asked for it. The
               pages still exist and still work if typed. */}
           {(!appOnly || expertActive) &&
-            [...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])].map((item) => (
-            <NavLink
-              key={item.href}
-              href={item.href}
-              active={pathname === item.href}
-              onNavigate={onClose}
-            >
-              {item.label}
-            </NavLink>
-          ))}
+            [...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])]
+              // Undefined is a session answered by a server too old to
+              // say so, or one still loading: offer the item, which is
+              // what happened before this was published.
+              .filter(
+                (item) =>
+                  item.href !== '/interactive' ||
+                  interactive === undefined ||
+                  interactive.length > 0,
+              )
+              .map((item) => (
+                <NavLink
+                  key={item.href}
+                  href={item.href}
+                  active={pathname === item.href}
+                  onNavigate={onClose}
+                >
+                  {item.label}
+                </NavLink>
+              ))}
 
           {appOnly && !expertActive && (
             // The door out. A visible link rather than a query

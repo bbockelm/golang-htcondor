@@ -74,6 +74,15 @@ type Server struct {
 	// atomically because a reconfigure can install a new one while a
 	// tools/list or a tool call is being served.
 	disabledTools atomic.Pointer[disabledToolMatcher]
+	// interactiveSessionsOff is set where this access point does not
+	// offer interactive sessions at all -- the access point's setting
+	// rather than an MCP one, since the web console's Terminal is the
+	// same capability.
+	//
+	// Stated negatively so the zero value offers them, which is what a
+	// Server built as a literal has always done. See
+	// interactive_offered.go.
+	interactiveSessionsOff atomic.Bool
 	// redaction is the credential-masking policy applied to tool
 	// results. Swapped atomically for the same reason. See
 	// redact_tools.go.
@@ -341,6 +350,14 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// InteractiveSessionsNotOffered withholds interactive_session_start,
+	// because this access point does not offer interactive sessions
+	// (HTTP_API_INTERACTIVE_TERMINAL = false).
+	//
+	// Stated negatively so the zero value offers them, which is what
+	// every server built before the setting existed did. See
+	// interactive_offered.go.
+	InteractiveSessionsNotOffered bool
 	// ToolStats, when set, is told about every tool call: which tool,
 	// for whom, from which client harness, the outcome and how long it
 	// took. Optional -- a nil recorder simply counts nothing, which is
@@ -634,6 +651,7 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
+	s.SetInteractiveSessionsOffered(!cfg.InteractiveSessionsNotOffered)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil && schedd == nil {

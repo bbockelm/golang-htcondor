@@ -303,6 +303,13 @@ func (s *Handler) handleJupyterPath(w http.ResponseWriter, r *http.Request) {
 	if rest == "" || rest == "/" {
 		switch r.Method {
 		case http.MethodPost:
+			// Only creation is refused where the site does not offer
+			// JupyterLab: the list below, and the tunnel and proxy
+			// further down, keep serving sessions that are already
+			// running so they drain rather than strand a held slot.
+			if !s.requireInteractiveApp(w, appJupyter) {
+				return
+			}
 			s.handleJupyterCreateInstance(w, r)
 		case http.MethodGet:
 			s.handleJupyterListInstances(w, r)

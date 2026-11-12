@@ -936,6 +936,11 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		if s.toolDisabled(t.Name) {
 			continue
 		}
+		// Likewise an access point that does not offer interactive
+		// sessions: that is not a decision about who is asking either.
+		if t.Name == "interactive_session_start" && !s.interactiveSessionsOffered() {
+			continue
+		}
 		if scopesAllowTool(grant, t.Name) {
 			filtered = append(filtered, t)
 		}
@@ -995,6 +1000,16 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	if s.toolDisabled(request.Name) {
 		err := errToolDisabled(request.Name)
 		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: disabled by configuration",
+			"tool", request.Name, "trace_id", traceID)
+		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
+		return nil, err
+	}
+
+	// And the same for starting a session where the site offers none: a
+	// client may hold a catalogue from before the setting changed.
+	if request.Name == "interactive_session_start" && !s.interactiveSessionsOffered() {
+		err := errInteractiveSessionsNotOffered()
+		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: this access point offers no interactive sessions",
 			"tool", request.Name, "trace_id", traceID)
 		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, err

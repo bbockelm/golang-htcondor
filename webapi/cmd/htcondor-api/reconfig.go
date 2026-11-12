@@ -62,6 +62,9 @@ type reconfigTarget interface {
 	// exist is not known until they are read.
 	SetSiteAppPolicy(*config.Config)
 	SetMCPDisabledTools(string)
+	SetInteractiveJupyter(string)
+	SetInteractiveVSCode(string)
+	SetInteractiveTerminal(string)
 	SetMCPRedactSecrets(string)
 	SetMCPRedactDisabledRules(string)
 	SetChatInstructions(string)
@@ -98,6 +101,24 @@ var reconfigParams = []reconfigParam{
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPDisabledTools(v)
 		},
+	},
+
+	// Which built-in interactive applications this access point offers.
+	// Dynamic because nothing is built from them: each is a check made
+	// when a session is created. Restarting the daemon to stop new
+	// notebooks being made would drop every notebook already running,
+	// which is precisely what these settings take care not to do.
+	{
+		name:  "HTTP_API_INTERACTIVE_JUPYTER",
+		apply: func(s reconfigTarget, v string) { s.SetInteractiveJupyter(v) },
+	},
+	{
+		name:  "HTTP_API_INTERACTIVE_VSCODE",
+		apply: func(s reconfigTarget, v string) { s.SetInteractiveVSCode(v) },
+	},
+	{
+		name:  "HTTP_API_INTERACTIVE_TERMINAL",
+		apply: func(s reconfigTarget, v string) { s.SetInteractiveTerminal(v) },
 	},
 
 	// Credential masking on MCP tool results. Both settings only decide

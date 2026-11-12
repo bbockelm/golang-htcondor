@@ -49,6 +49,10 @@ func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v)
 func (f *fakeTarget) SetSiteAppPolicy(*config.Config) { f.record("site_app_policy", "reread") }
 func (f *fakeTarget) SetMCPDisabledTools(v string)    { f.record("disabled_tools", v) }
 
+func (f *fakeTarget) SetInteractiveJupyter(v string)  { f.record("interactive_jupyter", v) }
+func (f *fakeTarget) SetInteractiveVSCode(v string)   { f.record("interactive_vscode", v) }
+func (f *fakeTarget) SetInteractiveTerminal(v string) { f.record("interactive_terminal", v) }
+
 func (f *fakeTarget) SetMCPRedactSecrets(v string)       { f.record("redact_secrets", v) }
 func (f *fakeTarget) SetMCPRedactDisabledRules(v string) { f.record("redact_disabled_rules", v) }
 
@@ -250,6 +254,37 @@ func TestReconfigAppliesDisabledTools(t *testing.T) {
 	}
 	if want := []string{"exec_in_job interactive_session_*"}; !reflect.DeepEqual(target.groups["disabled_tools"], want) {
 		t.Errorf("server received %v, want %v", target.groups["disabled_tools"], want)
+	}
+}
+
+// Restarting the daemon to stop new notebooks being made would drop
+// every notebook already running, which is what these settings take
+// care not to do -- so they have to be dynamic.
+func TestReconfigAppliesInteractiveApps(t *testing.T) {
+	for _, tc := range []struct {
+		param string
+		key   string
+	}{
+		{"HTTP_API_INTERACTIVE_JUPYTER", "interactive_jupyter"},
+		{"HTTP_API_INTERACTIVE_VSCODE", "interactive_vscode"},
+		{"HTTP_API_INTERACTIVE_TERMINAL", "interactive_terminal"},
+	} {
+		t.Run(tc.param, func(t *testing.T) {
+			target := &fakeTarget{}
+			w := newReconfigWatcher(configFrom(t, tc.param+" = true\n"), target, nil)
+
+			applied, needRestart := w.diff(configFrom(t, tc.param+" = false\n"))
+
+			if want := []string{tc.param}; !reflect.DeepEqual(applied, want) {
+				t.Errorf("applied = %v, want %v", applied, want)
+			}
+			if len(needRestart) != 0 {
+				t.Errorf("needRestart = %v, want none: this parameter is dynamic", needRestart)
+			}
+			if want := []string{"false"}; !reflect.DeepEqual(target.groups[tc.key], want) {
+				t.Errorf("server received %v, want %v", target.groups[tc.key], want)
+			}
+		})
 	}
 }
 

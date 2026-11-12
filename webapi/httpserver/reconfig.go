@@ -61,6 +61,38 @@ func (h *Handler) SetMCPDisabledTools(spec string) {
 	h.mcpServer.SetDisabledTools(spec)
 }
 
+// SetInteractiveJupyter, SetInteractiveVSCode and SetInteractiveTerminal
+// turn one of the three built-in interactive applications on or off.
+//
+// Dynamic because nothing is constructed from them: each is a check made
+// when a session is created, and the list /auth/me publishes is read per
+// request, so a reconfigure reaches the next launch and the next page
+// load. The alternative -- restarting the daemon -- drops every live
+// notebook and terminal to stop new ones being made, which is the
+// opposite of what these settings are careful about.
+//
+// Default true on an unparseable or empty value, matching the startup
+// default: these have always been served, and an operator who meant to
+// turn one off and mistyped is told so in the log rather than having it
+// happen.
+func (h *Handler) SetInteractiveJupyter(spec string) {
+	h.interactive.set(appJupyter, h.reconfigBool("HTTP_API_INTERACTIVE_JUPYTER", spec, true))
+}
+
+func (h *Handler) SetInteractiveVSCode(spec string) {
+	h.interactive.set(appVSCode, h.reconfigBool("HTTP_API_INTERACTIVE_VSCODE", spec, true))
+}
+
+func (h *Handler) SetInteractiveTerminal(spec string) {
+	on := h.reconfigBool("HTTP_API_INTERACTIVE_TERMINAL", spec, true)
+	h.interactive.set(appTerminal, on)
+	// The MCP interactive-session tools are the other front door onto
+	// the same thing, so they follow it. See interactive_apps.go.
+	if h.mcpServer != nil {
+		h.mcpServer.SetInteractiveSessionsOffered(on)
+	}
+}
+
 // SetMCPRedactSecrets turns credential masking on tool results on or off.
 //
 // The two masking settings are applied together because the rule set is

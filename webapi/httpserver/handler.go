@@ -279,6 +279,9 @@ type Handler struct {
 	mcpEnabled   bool
 	// reservationsEnabled gates the whole reservation subsystem.
 	reservationsEnabled bool
+	// interactive is which of the three built-in interactive
+	// applications this access point offers. See interactive_apps.go.
+	interactive interactiveApps
 	// reservationEPConstraint limits which startds reservations may draw
 	// seats from; empty means all of them.
 	reservationEPConstraint string
@@ -888,6 +891,18 @@ type HandlerConfig struct {
 	// of a scheduled window. Off unless configured, because holding
 	// capacity means evicting other people's jobs.
 	Reservations bool
+	// InteractiveJupyterDisabled, InteractiveVSCodeDisabled and
+	// InteractiveTerminalDisabled withhold one of the three built-in
+	// interactive applications (HTTP_API_INTERACTIVE_JUPYTER,
+	// _VSCODE, _TERMINAL = false).
+	//
+	// Stated negatively so the zero value is the one every installation
+	// had before these existed: all three offered. A Config built
+	// without thinking about them -- in a test, or by a caller written
+	// earlier -- keeps serving what it served.
+	InteractiveJupyterDisabled  bool
+	InteractiveVSCodeDisabled   bool
+	InteractiveTerminalDisabled bool
 
 	// ReservationStampBudget caps how many cluster ads one stamping
 	// pass writes. Zero takes the package default.
@@ -1584,6 +1599,21 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP,
 			"Container build jobs carry extra submit directives",
 			"lines", strings.Count(strings.TrimSpace(h.build.ExtraSubmit), "\n")+1)
+	}
+
+	// Which of the three built-in interactive applications this access
+	// point offers. Set here rather than in the literal above because
+	// they are atomics, read by request goroutines and written by the
+	// reconfigure one; and stated negatively in the config so that the
+	// zero value is "all three", which is what every installation had
+	// before the setting existed.
+	h.interactive.set(appJupyter, !cfg.InteractiveJupyterDisabled)
+	h.interactive.set(appVSCode, !cfg.InteractiveVSCodeDisabled)
+	h.interactive.set(appTerminal, !cfg.InteractiveTerminalDisabled)
+	if offered := h.interactive.offered(); len(offered) < 3 {
+		logger.Info(logging.DestinationHTTP,
+			"Interactive applications offered by this access point",
+			"apps", strings.Join(offered, " "))
 	}
 
 	// Independent of the extras block: an operator may constrain where
@@ -2513,6 +2543,9 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
+		// The access point's own setting, not an MCP one: the MCP
+		// session tools and the console's Terminal are one capability.
+		InteractiveSessionsNotOffered: !h.interactive.enabled(appTerminal),
 
 		DisableSecretRedaction: h.mcpDisableSecretRedaction,
 		RedactDisabledRules:    h.mcpRedactDisabledRules,
