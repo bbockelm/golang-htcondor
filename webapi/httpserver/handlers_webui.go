@@ -102,10 +102,18 @@ type AuthMeResponse struct {
 	// entry leading to three explanations of why nothing can be started
 	// is worse than no entry.
 	//
+	// NOT omitempty, and never nil: "this access point offers none" and
+	// "a server too old to say" must not be the same answer on the
+	// wire. They need opposite handling -- the first hides the
+	// applications, the second has to show them, because every server
+	// before this field offered all three. omitempty made an empty list
+	// absent and so made an old server look like a site that offers
+	// nothing, which hid the applications from every caller of one.
+	//
 	// Advisory, like the rest of this response: creating a session in an
 	// app this does not list is refused regardless of what the SPA does
 	// with it.
-	Interactive []string `json:"interactive,omitempty"`
+	Interactive []string `json:"interactive"`
 }
 
 // PlacementSessionInfo is the placement identity of a session.

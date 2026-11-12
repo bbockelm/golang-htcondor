@@ -15,7 +15,12 @@ import { api, type InteractiveApp } from '@/lib/api';
 
 export function useInteractiveApps(): InteractiveApp[] | undefined {
   const { data } = useQuery({ queryKey: ['session'], queryFn: api.auth.me });
-  return data === undefined ? undefined : (data.interactive ?? []);
+  // Undefined for both "still loading" and "the server did not say".
+  // Deliberately NOT coerced to []: an access point that offers none
+  // sends an empty list, and a server too old to know about the field
+  // sends nothing at all. Coercing the second into the first hid all
+  // three applications from everybody talking to an older server.
+  return data?.interactive;
 }
 
 // useInteractiveAppOffered is false only when the session has loaded and

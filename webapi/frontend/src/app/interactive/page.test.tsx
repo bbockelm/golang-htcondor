@@ -58,6 +58,18 @@ describe('the Interactive page', () => {
     expect(screen.getByText('Launch terminal')).toBeTruthy();
   });
 
+  // An ABSENT list is a server too old to say, not a site that offers
+  // nothing: every such server offers all three. Reading it as "none"
+  // hid every application from everyone talking to one -- caught by the
+  // multi-AP browser smoke test, whose mocked session has no such
+  // field.
+  it('offers every app when the server does not say', async () => {
+    await renderPage(undefined);
+    await waitFor(() => expect(screen.getByText('Launch JupyterLab')).toBeTruthy());
+    expect(screen.getByText('Launch VS Code')).toBeTruthy();
+    expect(screen.getByText('Launch terminal')).toBeTruthy();
+  });
+
   // The section goes entirely, rather than offering a form that the
   // server would refuse.
   it('drops the section for an app that is not offered', async () => {
