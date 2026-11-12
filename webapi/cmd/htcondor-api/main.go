@@ -2246,7 +2246,6 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// dashboard. Presentation only -- it restricts nothing.
 	webuiAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
 
-	siteAppsDir, siteAppsReload, siteAppsUpload := loadSiteAppsConfig(cfg, logger)
 	// Site branding. Every one of these is optional; unset leaves the
 	// web UI exactly as it ships. See webapi/httpserver/branding.go.
 	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
@@ -2293,6 +2292,12 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	} else {
 		logger.RedirectStdLog()
 	}
+
+	// Read here rather than up with the other configuration, because
+	// this one reports what it found and the logger does not exist
+	// until now. A directory that is configured and not being scanned
+	// is otherwise silent, which is the whole reason it says so.
+	siteAppsDir, siteAppsReload, siteAppsUpload := loadSiteAppsConfig(cfg, logger)
 
 	// Create collector
 	collector := setupCollector(cfg, logger)
