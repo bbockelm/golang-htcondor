@@ -324,12 +324,37 @@ func TestPoolCollectorIntegration(t *testing.T) {
 	t.Run("CollectPoolMetrics", func(t *testing.T) {
 		poolCollector := NewPoolCollector(collector)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		metrics, err := poolCollector.Collect(ctx)
-		if err != nil {
-			t.Fatalf("Failed to collect metrics: %v", err)
+		// Collected until the schedd is in the answer, not once.
+		//
+		// Each daemon advertises to the collector on its own schedule,
+		// so the pool is not whole the instant the harness returns --
+		// it is whole once every daemon has had an update interval.
+		// One collection right after startup regularly saw the startd
+		// and not the schedd, and then failed on "Expected at least 1
+		// schedd, got 0", which reads like a broken collector rather
+		// than a pool that was still assembling.
+		//
+		// Waiting on the schedd alone is enough: it is the last ad to
+		// arrive here, and everything else asserted below was already
+		// present when this failed.
+		var metrics []Metric
+		var err error
+		for {
+			metrics, err = poolCollector.Collect(ctx)
+			if err != nil {
+				t.Fatalf("Failed to collect metrics: %v", err)
+			}
+			if metricValue(metrics, "htcondor_pool_schedds_total") >= 1 {
+				break
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("no schedd had advertised to the collector after %v; "+
+					"collected %d metrics", 60*time.Second, len(metrics))
+			}
+			time.Sleep(time.Second)
 		}
 
 		if len(metrics) == 0 {
@@ -534,4 +559,15 @@ func TestPoolCollectorIntegration(t *testing.T) {
 
 		t.Logf("Combined collection: %d total metrics (pool + process)", len(metrics))
 	})
+}
+
+// metricValue is one gauge's value, or -1 when the collection does not
+// hold it.
+func metricValue(metrics []Metric, name string) float64 {
+	for _, m := range metrics {
+		if m.Name == name {
+			return m.Value
+		}
+	}
+	return -1
 }
