@@ -416,6 +416,16 @@ type Handler struct {
 	revocationOracles []RevocationOracle
 	mcpInstructions   string // Server-level instructions provided to agents via MCP initialize
 	mcpDisabledTools  string // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
+	// HTTP_API_MCP_READ_ONLY: this installation offers MCP, and offers
+	// nothing through it that changes anything. Kept here because the
+	// OAuth2 side reads it too -- a server that will refuse every write
+	// should not be granting mcp:write or advertising it.
+	//
+	// Atomic because those readers are request goroutines and the
+	// writer is the reconfigure one. The settings beside this are
+	// written on a reconfigure and read only while applying it, which
+	// is why they are plain fields and this is not.
+	mcpReadOnly atomic.Bool
 	// HTTP_API_MCP_REDACT_SECRETS / _DISABLED_RULES: credential masking
 	// on tool results. Both are kept because the two settings are
 	// applied together and a reconfigure delivers one at a time.
@@ -1153,6 +1163,9 @@ type HandlerConfig struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
+	// changes anything, for every caller regardless of scope.
+	MCPReadOnly bool
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false). Negative so that the
 	// zero value is the protective one; see mcpserver.Config.
@@ -2265,6 +2278,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpDisabledTools = cfg.MCPDisabledTools
+		h.mcpReadOnly.Store(cfg.MCPReadOnly)
 		h.mcpDisableSecretRedaction = cfg.MCPDisableSecretRedaction
 		h.mcpRedactDisabledRules = cfg.MCPRedactDisabledRules
 		h.mcpSkillsDir = cfg.MCPSkillsDir
@@ -2530,6 +2544,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
+		ReadOnly:       h.mcpReadOnly.Load(),
 
 		DisableSecretRedaction: h.mcpDisableSecretRedaction,
 		RedactDisabledRules:    h.mcpRedactDisabledRules,

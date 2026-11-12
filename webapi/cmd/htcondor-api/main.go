@@ -169,6 +169,9 @@ type mcpConfig struct {
 	skillsDir            string
 	skillsReloadInterval time.Duration
 	disabledTools        string
+	// readOnly is HTTP_API_MCP_READ_ONLY: serve MCP, but serve nothing
+	// through it that changes anything.
+	readOnly bool
 	// disableSecretRedaction is HTTP_API_MCP_REDACT_SECRETS = false.
 	// Negative so the zero value is the protective one.
 	disableSecretRedaction bool
@@ -1699,6 +1702,12 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 		logger.Info(logging.DestinationMCP, "MCP tools disabled by configuration", "patterns", disabled)
 	}
 
+	config.readOnly = mcpReadOnly(cfg)
+	if config.readOnly {
+		logger.Info(logging.DestinationMCP,
+			"MCP is read-only by configuration (HTTP_API_MCP_READ_ONLY); no tool that changes anything will be offered or accepted")
+	}
+
 	loadMCPRedaction(cfg, &config)
 
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
@@ -2545,6 +2554,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPSuperuserGroup:          mcpCfg.mcpSuperuserGroup,
 		MCPInstructions:            mcpCfg.instructions,
 		MCPDisabledTools:           mcpCfg.disabledTools,
+		MCPReadOnly:                mcpCfg.readOnly,
 		MCPDisableSecretRedaction:  mcpCfg.disableSecretRedaction,
 		MCPRedactDisabledRules:     mcpCfg.redactDisabledRules,
 		MCPSkillsDir:               mcpCfg.skillsDir,
@@ -3662,6 +3672,27 @@ func loadMCPRedaction(cfg *config.Config, into *mcpConfig) {
 	if rules, ok := cfg.Get("HTTP_API_MCP_REDACT_DISABLED_RULES"); ok {
 		into.redactDisabledRules = rules
 	}
+}
+
+// mcpReadOnly reports whether this access point serves MCP without any
+// tool that changes anything.
+//
+// Default false: the server offers what it has always offered, and a
+// site that wants less says so. Unparseable is fatal rather than
+// ignored, which is the same choice the masking setting makes and for a
+// sharper reason -- the two ways to misread "HTTP_API_MCP_READ_ONLY =
+// yes please" are "read-only" and "full write access", and a daemon that
+// guesses wrong on that one should not come up at all.
+func mcpReadOnly(cfg *config.Config) bool {
+	raw, ok := cfg.Get("HTTP_API_MCP_READ_ONLY")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid HTTP_API_MCP_READ_ONLY=%q: must be a boolean", raw)
+	}
+	return v
 }
 
 // mcpRedactSecretsEnabled reports whether MCP tool results have

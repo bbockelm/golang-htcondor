@@ -362,6 +362,9 @@ type Config struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
+	// changes anything, whatever the caller's scopes say.
+	MCPReadOnly bool
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false).
 	MCPDisableSecretRedaction bool
@@ -622,6 +625,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
+		MCPReadOnly:                 cfg.MCPReadOnly,
 		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
 		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
