@@ -1615,19 +1615,28 @@ var mcpOnlyScopes = []string{"mcp:read", "mcp:write"}
 
 // advertisedScopes is the scope set this server publishes in its
 // discovery documents: oauth2AdvertisedScopes, less mcp:read and
-// mcp:write where MCP is off.
+// mcp:write where MCP is off, and less mcp:write where MCP is served
+// read-only.
 //
 // Only the advertisement narrows. What a client may request
 // (cimdClientScopes, client registration) is unchanged, so a grant
 // already carrying mcp:* still refreshes, and switching MCP off and on
-// again strands nobody.
+// again strands nobody. The read-only case rests on that too: a client
+// asks for each scope the server advertises, so dropping mcp:write here
+// is what stops a consent page offering a user a write authorization
+// this server would then refuse to use.
 func (h *Handler) advertisedScopes() []string {
-	if h.mcpEnabled {
-		return oauth2AdvertisedScopes
+	if !h.mcpEnabled {
+		return slices.DeleteFunc(slices.Clone(oauth2AdvertisedScopes), func(s string) bool {
+			return slices.Contains(mcpOnlyScopes, s)
+		})
 	}
-	return slices.DeleteFunc(slices.Clone(oauth2AdvertisedScopes), func(s string) bool {
-		return slices.Contains(mcpOnlyScopes, s)
-	})
+	if h.mcpReadOnly.Load() {
+		return slices.DeleteFunc(slices.Clone(oauth2AdvertisedScopes), func(s string) bool {
+			return s == "mcp:write"
+		})
+	}
+	return oauth2AdvertisedScopes
 }
 
 // oauth2DeprecatedScopes were advertised once and are not any more. They

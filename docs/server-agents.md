@@ -60,10 +60,18 @@ call. A user who wants the thing done will approve the prompt, and the
 request that led there may not have been the user's own. The controls
 that hold are the ones enforced on this side:
 
+- `HTTP_API_MCP_READ_ONLY` serves the whole MCP surface read-only, for
+  every caller — see [A read-only access point](#a-read-only-access-point)
+  below. This is the control to reach for when the answer to "should our
+  users have agents" is yes and the answer to "should those agents be
+  able to act" is no.
 - `HTTP_API_MCP_ACCESS_GROUP`, narrowed by `HTTP_API_MCP_READ_GROUP` and
   `HTTP_API_MCP_WRITE_GROUP`, decides who may drive the access point and
   whether they may change anything or only look. A read-only grant is a
-  real reduction and is worth being the default for most people.
+  real reduction and is worth being the default for most people. It is
+  the caller's authorization rather than the server's policy, so it does
+  not reach a caller with no scopes at all; `HTTP_API_MCP_READ_ONLY`
+  does.
 - `HTTP_API_MCP_DISABLED_TOOLS` withdraws tools the site does not want
   offered at all — see [Disabling tools](#disabling-tools) below. It
   raises the cost of a shell but does not remove it: withdrawing
@@ -79,6 +87,39 @@ that hold are the ones enforced on this side:
   `condor_ssh_to_job` is permitted. These bind an agent exactly as they
   bind a person, which is the reason to put a site's limits there rather
   than hoping the agent respects them.
+
+## A read-only access point
+
+A site can offer MCP and offer nothing through it that changes anything:
+
+```
+HTTP_API_MCP_READ_ONLY = true
+```
+
+Every tool that submits, holds, releases, removes, edits, uploads,
+advertises, stores a credential or starts a session is left out of
+`tools/list` and refused if called anyway. What remains is the whole
+reading surface — the queue, the history, the archive, the pool, job
+output, the documentation and skills tools, and the watches, which
+record nothing outside this server's own bookkeeping.
+
+This is the server's decision and not the caller's, which is the reason
+it exists alongside `HTTP_API_MCP_WRITE_GROUP`. A write group is checked
+when a scope is granted, so it binds OAuth2 callers and nobody else: a
+forwarded HTCondor IDTOKEN carries no scopes by design — HTCondor gates
+it instead — and a token granted `mcp:write` before the policy changed
+keeps carrying it until it is refreshed. `HTTP_API_MCP_READ_ONLY` is
+enforced in the tool server itself, which every transport and every kind
+of caller passes through, so none of those are exceptions to it.
+
+While it is on, `mcp:write` is neither advertised nor granted, so a
+consent page does not offer a user a write authorization this server
+would then refuse to honour. A token that already holds `mcp:write` is
+not revoked; it simply buys nothing here.
+
+Applied on SIGHUP (or `condor_reconfig`), including for sessions already
+connected. REST clients, the web console and `condor_submit` are
+untouched: this governs the MCP tool surface, not the access point.
 
 ## Disabling tools
 

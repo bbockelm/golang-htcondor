@@ -61,6 +61,27 @@ func (h *Handler) SetMCPDisabledTools(spec string) {
 	h.mcpServer.SetDisabledTools(spec)
 }
 
+// SetMCPReadOnly turns the site-wide read-only MCP surface on or off.
+//
+// Dynamic for the reason the disabled-tool list is: an operator who
+// discovers their agents can act when they meant them only to look
+// should be able to stop it now, for the sessions already connected,
+// rather than at the next restart.
+//
+// The grant side is not re-run here. Tokens already carrying mcp:write
+// keep carrying it until they refresh, and it buys them nothing: the
+// refusal is in the tool server, which every transport passes through.
+//
+// No-op when MCP is disabled, since there is then no server to tell.
+func (h *Handler) SetMCPReadOnly(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	readOnly := h.reconfigBool("HTTP_API_MCP_READ_ONLY", spec, false)
+	h.mcpReadOnly.Store(readOnly)
+	h.mcpServer.SetReadOnly(readOnly)
+}
+
 // SetMCPRedactSecrets turns credential masking on tool results on or off.
 //
 // The two masking settings are applied together because the rule set is

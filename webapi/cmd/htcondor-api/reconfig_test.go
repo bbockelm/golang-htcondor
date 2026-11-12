@@ -48,6 +48,7 @@ func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v)
 // what a reconfigure does with it; there is no single value to record.
 func (f *fakeTarget) SetSiteAppPolicy(*config.Config) { f.record("site_app_policy", "reread") }
 func (f *fakeTarget) SetMCPDisabledTools(v string)    { f.record("disabled_tools", v) }
+func (f *fakeTarget) SetMCPReadOnly(v string)         { f.record("read_only", v) }
 
 func (f *fakeTarget) SetMCPRedactSecrets(v string)       { f.record("redact_secrets", v) }
 func (f *fakeTarget) SetMCPRedactDisabledRules(v string) { f.record("redact_disabled_rules", v) }
@@ -250,6 +251,26 @@ func TestReconfigAppliesDisabledTools(t *testing.T) {
 	}
 	if want := []string{"exec_in_job interactive_session_*"}; !reflect.DeepEqual(target.groups["disabled_tools"], want) {
 		t.Errorf("server received %v, want %v", target.groups["disabled_tools"], want)
+	}
+}
+
+// The setting an operator reaches for when an agent has just done
+// something they did not expect, which is the worst possible moment to
+// be told to restart the daemon.
+func TestReconfigAppliesReadOnly(t *testing.T) {
+	target := &fakeTarget{}
+	w := newReconfigWatcher(configFrom(t, "HTTP_API_MCP_READ_ONLY = false\n"), target, nil)
+
+	applied, needRestart := w.diff(configFrom(t, "HTTP_API_MCP_READ_ONLY = true\n"))
+
+	if want := []string{"HTTP_API_MCP_READ_ONLY"}; !reflect.DeepEqual(applied, want) {
+		t.Errorf("applied = %v, want %v", applied, want)
+	}
+	if len(needRestart) != 0 {
+		t.Errorf("needRestart = %v, want none: this parameter is dynamic", needRestart)
+	}
+	if want := []string{"true"}; !reflect.DeepEqual(target.groups["read_only"], want) {
+		t.Errorf("server received %v, want %v", target.groups["read_only"], want)
 	}
 }
 

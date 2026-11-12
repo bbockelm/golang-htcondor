@@ -74,6 +74,11 @@ type Server struct {
 	// atomically because a reconfigure can install a new one while a
 	// tools/list or a tool call is being served.
 	disabledTools atomic.Pointer[disabledToolMatcher]
+	// readOnly is the operator's HTTP_API_MCP_READ_ONLY decision: when
+	// set, no tool that changes anything is offered or accepted, whatever
+	// the caller's scopes say. Atomic for the same reason as the matcher
+	// above. See read_only.go.
+	readOnly atomic.Bool
 	// redaction is the credential-masking policy applied to tool
 	// results. Swapped atomically for the same reason. See
 	// redact_tools.go.
@@ -341,6 +346,12 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// ReadOnly (HTTP_API_MCP_READ_ONLY) withholds every tool that changes
+	// anything, for an installation that wants its users to have agents
+	// without those agents being able to act. Unlike the mcp:read scope
+	// this binds every caller, including the unscoped ones. See
+	// read_only.go.
+	ReadOnly bool
 	// ToolStats, when set, is told about every tool call: which tool,
 	// for whom, from which client harness, the outcome and how long it
 	// took. Optional -- a nil recorder simply counts nothing, which is
@@ -634,6 +645,7 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
+	s.SetReadOnly(cfg.ReadOnly)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil && schedd == nil {
