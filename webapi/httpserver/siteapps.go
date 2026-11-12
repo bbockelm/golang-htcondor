@@ -55,19 +55,13 @@ func (h *Handler) newSiteAppLibrary(dir string, params *config.Config) *siteapps
 	return lib
 }
 
-// siteAppPolicy builds the policy source for a configuration.
+// configPolicyFor builds the configuration-backed policy source.
 //
 // The nil check is load-bearing: a *config.Config that is nil put into
 // a PolicySource interface makes an interface that is NOT nil, so
 // every lookup would call a method on a nil pointer rather than
 // finding no policy. A server with no HTCondor configuration -- demo
 // mode, tests -- declares no apps instead.
-func siteAppPolicy(params *config.Config) siteapps.PolicySource {
-	return configPolicyFor(params)
-}
-
-// configPolicyFor is siteAppPolicy's concrete answer, for the places
-// that need the configuration source by itself.
 func configPolicyFor(params *config.Config) *siteapps.ConfigPolicy {
 	if params == nil {
 		return siteapps.NewConfigPolicy(nil)

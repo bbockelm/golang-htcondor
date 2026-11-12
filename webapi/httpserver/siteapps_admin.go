@@ -45,6 +45,20 @@ import (
 // bundle over 512 MiB anyway; this refuses it before it is written.
 const maxSiteAppBundleBytes = 512 << 20
 
+// uploadFormSlackBytes is room for the other form fields and the
+// multipart framing on top of the bundle itself, so a bundle at
+// exactly the limit is not refused by the body cap.
+const uploadFormSlackBytes = 1 << 20
+
+// uploadFormMemoryBytes is how much of the form is held in memory
+// before Go spills to temporary files.
+const uploadFormMemoryBytes = 16 << 20
+
+// uploadBodyLimit is the whole request body's ceiling. A variable so a
+// test can lower it and check the cap is actually wired to the reader
+// without building half a gigabyte to do it.
+var uploadBodyLimit int64 = maxSiteAppBundleBytes + uploadFormSlackBytes
+
 // AdminSiteApp is one app as the admin page shows it.
 type AdminSiteApp struct {
 	ID          string   `json:"id"`
@@ -138,7 +152,7 @@ func (s *Handler) handleAdminSiteApps(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminListSiteApps answers what is published now.
-func (s *Handler) adminListSiteApps(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) adminListSiteApps(w http.ResponseWriter, _ *http.Request) {
 	resp := AdminSiteAppsResponse{Apps: []AdminSiteApp{}}
 	if s.siteApps == nil {
 		s.writeJSON(w, http.StatusOK, resp)
@@ -213,7 +227,20 @@ func (s *Handler) adminUploadSiteApp(w http.ResponseWriter, r *http.Request) {
 				s.siteApps.Dir()+" and name its groups in the configuration.")
 		return
 	}
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
+	// ParseMultipartForm's argument bounds only what is kept in
+	// memory; everything past it spills to temporary files, so on its
+	// own it bounds nothing.
+	//
+	// setBodyLimit, not http.MaxBytesReader: a bundle is larger than
+	// the default request body, and wrapping the body again can only
+	// LOWER the limit -- this route would have silently got the
+	// default and refused the uploads it exists to accept. It is also
+	// what makes an overflow a 413 rather than whatever status this
+	// handler picks for an unparseable form.
+	setBodyLimit(w, r, uploadBodyLimit)
+	//nolint:gosec // G120: the body is bounded by setBodyLimit on the line above, which is the
+	// bound that matters -- this argument only sizes the in-memory part.
+	if err := r.ParseMultipartForm(uploadFormMemoryBytes); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid upload: %v", err))
 		return
 	}
@@ -324,7 +351,15 @@ func (s *Handler) writeUploadedBundle(id string, src io.Reader) (digest string, 
 	if err = os.Chmod(tmpName, 0o600); err != nil {
 		return "", 0, err
 	}
-	if err = os.Rename(tmpName, filepath.Join(dir, id+".zip")); err != nil {
+	target, err := bundlePath(dir, id)
+	if err != nil {
+		return "", 0, err
+	}
+	// G703: target comes from bundlePath, which rejects any id
+	// ValidateID does not allow -- lowercase letters, digits, hyphen
+	// and underscore only, no separators and no leading dot -- so it
+	// cannot leave dir.
+	if err = os.Rename(tmpName, target); err != nil { //nolint:gosec // G703: see above
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), size, nil
@@ -355,7 +390,14 @@ func (s *Handler) adminWithdrawSiteApp(w http.ResponseWriter, r *http.Request, i
 		s.writeError(w, http.StatusInternalServerError, "Could not withdraw the app")
 		return
 	}
-	if err := os.Remove(filepath.Join(s.siteApps.Dir(), id+".zip")); err != nil && !errors.Is(err, os.ErrNotExist) {
+	stale, pathErr := bundlePath(s.siteApps.Dir(), id)
+	if pathErr != nil {
+		s.writeError(w, http.StatusBadRequest, pathErr.Error())
+		return
+	}
+	// G703: as in writeUploadedBundle -- bundlePath validates the id
+	// against ValidateID's allow-list before joining it to dir.
+	if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: see above
 		// The app is already unpublished; the leftover file is inert
 		// and worth a log line rather than an error to the caller.
 		s.logger.Warn(logging.DestinationHTTP, "site app bundle left behind", "app", id, "error", err)
@@ -382,4 +424,21 @@ func (s *Handler) siteAppConfigPolicy() siteapps.PolicySource {
 		return siteapps.NewConfigPolicy(nil)
 	}
 	return s.siteAppConfig
+}
+
+// bundlePath is where an app's bundle lives.
+//
+// The id is validated HERE rather than trusted from the caller, even
+// though every caller has already validated it. It becomes a file name
+// one line later, and ValidateID's allow-list -- lowercase letters,
+// digits, hyphen and underscore, no leading dot, no separators -- is
+// the whole reason joining it to a directory is safe. Taint analysis
+// cannot see through the call, so the suppression below says what the
+// check above it establishes; moving the check away from the join
+// would make the suppression a claim about code somewhere else.
+func bundlePath(dir, id string) (string, error) {
+	if err := siteapps.ValidateID(id); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, id+".zip"), nil //nolint:gosec // G703: id is allow-listed by ValidateID immediately above
 }

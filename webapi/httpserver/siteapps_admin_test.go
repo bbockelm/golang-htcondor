@@ -281,3 +281,61 @@ func TestSiteAppListingMarksConfiguredAppsUnmanaged(t *testing.T) {
 		t.Error("no digest: every zip is hashed whether or not a .sha256 came with it")
 	}
 }
+
+// The body cap is the real bound, and this proves it rather than
+// trusting the MaxBytesReader call to be in the right place.
+//
+// ParseMultipartForm's own argument sizes the in-memory part only;
+// everything past it spills to temporary files, so without the reader
+// cap an upload is bounded by the disk. gosec cannot see the mitigation
+// and the suppression there says it exists -- so something has to check
+// that it does.
+func TestSiteAppUploadRefusesAnOversizedBody(t *testing.T) {
+	dir := t.TempDir()
+	h := siteAppServer(t, dir)
+	h.siteAppUpload = true
+	h.siteAppUploads = siteapps.NewUploadStore(h.db)
+
+	// A body past the cap. The content is irrelevant: it must be
+	// refused while being read, not parsed and then judged.
+	huge := bytes.Repeat([]byte("x"), 64*1024)
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("id", "big"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.WriteField("groups", "lab"); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := mw.CreateFormFile("bundle", "big.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := fw.Write(huge); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/admin/site-apps", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	// Cap it well below the body so the test does not have to build
+	// half a gigabyte to find out whether the reader is wired up.
+	prev := uploadBodyLimit
+	uploadBodyLimit = 1 << 20
+	t.Cleanup(func() { uploadBodyLimit = prev })
+
+	w := httptest.NewRecorder()
+	h.adminUploadSiteApp(w, req)
+
+	if w.Code != http.StatusBadRequest && w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want the oversized body refused: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big.zip")); !os.IsNotExist(err) {
+		t.Error("an oversized upload left a bundle behind")
+	}
+}
