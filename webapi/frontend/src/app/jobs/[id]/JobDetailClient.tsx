@@ -17,6 +17,7 @@ import {
 import { useResolvedParams } from '@/lib/useResolvedParams';
 import { humanDuration } from '@/lib/duration';
 import { useMultiAPMode } from '@/lib/multiap';
+import { useSSHToJob } from '@/lib/sshToJob';
 import { summarizeRequirements, standardLabels } from '@/lib/requirements';
 import { batchIDOfJob, batchPagePath, coresUsed, jobTiming } from '@/lib/batches';
 import { OwnerLink } from '@/components/OwnerLink';
@@ -479,13 +480,17 @@ function JobDetail({ jobID, job }: { jobID: string; job: ClassAd }) {
   const exitBySignal = job.ExitBySignal === true || job.ExitBySignal === 'true';
   const showExitCode = exitCodeNum !== undefined || exitBySignal;
 
+  const sshToJob = useSSHToJob();
+
   // Asks from the run time card to open the live tail or the terminal
   // further down: each click bumps a count the panel watches.
   const [tailRequest, setTailRequest] = useState(0);
   const [shellRequest, setShellRequest] = useState(0);
   const remote = supportsRemoteAccess(job);
   const canTail = status === 2 && remote;
-  const canShell = (status === 2 || status === 6) && remote;
+  // The live tail reads the starter, which is not ssh-to-job, so it is
+  // not gated on it -- only the shell is.
+  const canShell = (status === 2 || status === 6) && remote && sshToJob;
 
   // The similar-jobs section, opened from the Related row or the run
   // time card's basis line, both of which bring it into view.
@@ -1109,6 +1114,7 @@ function TerminalPanel({
   // Bumped to open the shell from elsewhere on the page.
   openRequest?: number;
 }) {
+  const sshToJob = useSSHToJob();
   const [open, setOpen] = useState(false);
   const [seenRequest, setSeenRequest] = useState(openRequest);
   if (openRequest !== seenRequest) {
@@ -1130,6 +1136,10 @@ function TerminalPanel({
   // running" -- which for a scheduler-universe job that IS running
   // reads as a bug in the page rather than as a property of the job.
   if (!supportsRemoteAccess(job)) return null;
+  // And the same where the site allows nothing into a job at all: the
+  // card would say "available while the job is running" about something
+  // that will never be available here.
+  if (!sshToJob) return null;
 
   return (
     <div

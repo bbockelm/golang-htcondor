@@ -83,6 +83,10 @@ type Server struct {
 	// Server built as a literal has always done. See
 	// interactive_offered.go.
 	interactiveSessionsOff atomic.Bool
+	// sshToJobOff is set where this access point allows nothing to reach
+	// into a running job (HTTP_API_SSH_TO_JOB = false). Negative for the
+	// same reason as the flag above. See interactive_offered.go.
+	sshToJobOff atomic.Bool
 	// redaction is the credential-masking policy applied to tool
 	// results. Swapped atomically for the same reason. See
 	// redact_tools.go.
@@ -350,6 +354,12 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// SSHToJobNotOffered withholds every tool that reaches into a
+	// running job -- exec_in_job and the two session tools that enter
+	// the sandbox -- because this access point allows nothing to
+	// (HTTP_API_SSH_TO_JOB = false). Negative so the zero value allows
+	// it.
+	SSHToJobNotOffered bool
 	// InteractiveSessionsNotOffered withholds interactive_session_start,
 	// because this access point does not offer interactive sessions
 	// (HTTP_API_INTERACTIVE_TERMINAL = false).
@@ -652,6 +662,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetInteractiveSessionsOffered(!cfg.InteractiveSessionsNotOffered)
+	s.SetSSHToJobOffered(!cfg.SSHToJobNotOffered)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil && schedd == nil {

@@ -12,6 +12,13 @@ HTTP_API_SSH_GATEWAY_ADDRESS = :2222
 HTTP_API_SSH_HOST_KEY_FILE = /etc/condor/htcondor-api/ssh_host_key
 ```
 
+The gateway does not start where the site allows nothing to reach into
+a running job ([`HTTP_API_SSH_TO_JOB =
+false`](server-interactive.md#sites-that-forbid-condor_ssh_to_job)) --
+a listener that accepts connections only to refuse them is worse than
+no listener, because it answers on the port and so looks configured.
+The address can stay set; it is logged and ignored.
+
 A user connects with a stock `ssh` and sees:
 
 ```

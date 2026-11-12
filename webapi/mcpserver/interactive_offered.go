@@ -1,10 +1,6 @@
 package mcpserver
 
-import (
-	"fmt"
-
-	"github.com/bbockelm/golang-htcondor/logging"
-)
+import "github.com/bbockelm/golang-htcondor/logging"
 
 // Whether this access point offers interactive sessions at all.
 //
@@ -47,11 +43,59 @@ func (s *Server) interactiveSessionsOffered() bool {
 	return !s.interactiveSessionsOff.Load()
 }
 
-// errInteractiveSessionsNotOffered is what a caller gets for trying to
-// start one where the site does not offer them. It names the setting,
-// for whoever reads the transcript, and says the existing tools still
-// work so an agent mid-task knows it has not lost the session it holds.
-func errInteractiveSessionsNotOffered() error {
-	return fmt.Errorf("this access point does not offer interactive sessions (HTTP_API_INTERACTIVE_TERMINAL), so no new one can be started; " +
-		"sessions already running can still be listed, used and stopped")
+// Whether anything may reach into a running job at all.
+//
+// The access point's HTTP_API_SSH_TO_JOB, arriving here for the same
+// reason the terminal setting does: a site that forbids
+// condor_ssh_to_job forbids it however the request is dressed, and an
+// agent is a way of dressing it.
+//
+// It withdraws more than the terminal setting, and less than
+// everything. Starting a session and running a command in one both go
+// into the sandbox, as exec_in_job does, so all three go. Listing
+// sessions reads the queue and stopping one removes a job: neither
+// touches the sandbox, and withdrawing them would leave an agent
+// holding sessions it could not clean up.
+
+// SetSSHToJobOffered records whether anything may reach into a running
+// job. Called at startup and on a reconfigure.
+func (s *Server) SetSSHToJobOffered(on bool) {
+	if s.sshToJobOff.Swap(!on) == !on {
+		return
+	}
+	if !on {
+		s.logger.Info(logging.DestinationMCP,
+			"This access point allows nothing to reach into a running job (HTTP_API_SSH_TO_JOB); "+
+				"exec_in_job, interactive_session_start and interactive_session_exec are withdrawn")
+	} else {
+		s.logger.Info(logging.DestinationMCP, "Reaching into a running job is allowed again")
+	}
+	s.InvalidateCatalog()
+}
+
+// sshToJobTools are the tools that reach into a running job's sandbox.
+var sshToJobTools = map[string]bool{
+	"exec_in_job":               true,
+	"interactive_session_start": true,
+	"interactive_session_exec":  true,
+}
+
+// toolWithheldBySite reports whether the ACCESS POINT (rather than this
+// server's own MCP settings, or the caller's scopes) does not offer a
+// tool, and what to say about it.
+//
+// One function rather than a check per setting at each call site,
+// because there are two settings and three places that have to agree:
+// the catalogue, the dispatcher, and whatever the next transport turns
+// out to be.
+func (s *Server) toolWithheldBySite(name string) (string, bool) {
+	if s.sshToJobOff.Load() && sshToJobTools[name] {
+		return "this access point does not allow anything to reach into a running job (HTTP_API_SSH_TO_JOB), so %q is not available to any caller; " +
+			"a job's output and files are still readable, and a session can still be listed and stopped", true
+	}
+	if !s.interactiveSessionsOffered() && name == "interactive_session_start" {
+		return "this access point does not offer interactive sessions (HTTP_API_INTERACTIVE_TERMINAL), so %q cannot start one; " +
+			"sessions already running can still be listed, used and stopped", true
+	}
+	return "", false
 }

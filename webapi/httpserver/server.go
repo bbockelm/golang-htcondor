@@ -222,6 +222,10 @@ type Config struct {
 	// the admin page and the controller that holds pool capacity. Off
 	// unless configured, because it evicts other people's jobs.
 	Reservations bool
+	// SSHToJobDisabled withdraws everything built on condor_ssh_to_job
+	// (HTTP_API_SSH_TO_JOB = false). Stated negatively so the zero
+	// value allows it. See ssh_to_job.go.
+	SSHToJobDisabled bool
 	// InteractiveJupyterDisabled, InteractiveVSCodeDisabled and
 	// InteractiveTerminalDisabled withhold one of the three built-in
 	// interactive applications (HTTP_API_INTERACTIVE_JUPYTER,
@@ -585,6 +589,7 @@ func NewServer(cfg Config) (*Server, error) {
 		DagmanPath:                  cfg.DagmanPath,
 		DagmanEnvironment:           cfg.DagmanEnvironment,
 		InteractiveRequirements:     cfg.InteractiveRequirements,
+		SSHToJobDisabled:            cfg.SSHToJobDisabled,
 		InteractiveJupyterDisabled:  cfg.InteractiveJupyterDisabled,
 		InteractiveVSCodeDisabled:   cfg.InteractiveVSCodeDisabled,
 		InteractiveTerminalDisabled: cfg.InteractiveTerminalDisabled,

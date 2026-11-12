@@ -98,6 +98,11 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+	// The certificate exists to authenticate to the SSH gateway, which
+	// does not run where nothing may reach into a job.
+	if !s.requireSSHToJob(w) {
+		return
+	}
 	if _, _, err := s.requireAuthentication(r); err != nil {
 		s.writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
@@ -137,6 +142,11 @@ func (s *Handler) handleSSHCA(w http.ResponseWriter, r *http.Request) {
 func (s *Handler) handleSSHCertificate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	// The certificate exists to authenticate to the SSH gateway, which
+	// does not run where nothing may reach into a job.
+	if !s.requireSSHToJob(w) {
 		return
 	}
 	if s.refuseForPlacementdSession(w, r, "SSH certificates") {

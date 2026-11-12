@@ -103,6 +103,13 @@ var reconfigParams = []reconfigParam{
 		},
 	},
 
+	// Whether anything may reach into a running job. NOT dynamic: the
+	// SSH gateway's listener is built at startup, and a setting that
+	// closed the tool surface while leaving the port open would be the
+	// worst of both. An operator turning this off restarts the daemon,
+	// and is told so rather than left to discover it.
+	{name: "HTTP_API_SSH_TO_JOB"},
+
 	// Which built-in interactive applications this access point offers.
 	// Dynamic because nothing is built from them: each is a check made
 	// when a session is created. Restarting the daemon to stop new

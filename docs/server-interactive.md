@@ -4,6 +4,50 @@ Browser terminals, JupyterLab and VS Code are ordinary HTCondor jobs
 reached through this server. Part of the
 [HTTP API + MCP server](server.md) documentation.
 
+## Sites that forbid condor_ssh_to_job
+
+Some sites do not allow anyone into a running job, by policy. At such a
+site every feature here that reaches into a sandbox is dead on arrival:
+it submits a job, waits for it, and fails at the connect with a
+permission error that reads like a bug in this server. One setting says
+so:
+
+```
+HTTP_API_SSH_TO_JOB = false
+```
+
+It withdraws:
+
+- the **SSH gateway** — no listener is started, and the certificate and
+  consent endpoints that serve it refuse;
+- `/api/v1/jobs/{id}/ssh`, the **terminal on the job page**, which the
+  console then leaves out rather than offering one that cannot connect;
+- `/api/v1/jobs/{id}/proxy/…`, the **job proxy**, which rides the same
+  transport — and with it the **VS Code** application, which is reached
+  through it;
+- the **Terminal** application;
+- `exec_in_job`, `interactive_session_start` and
+  `interactive_session_exec` over **MCP**. `interactive_session_list`
+  and `_stop` stay: they read the queue and remove a job, touching no
+  sandbox, and withdrawing them would leave an agent holding sessions it
+  could not clean up.
+
+**JupyterLab is not withdrawn.** Its traffic goes through a tunnel the
+job dials back to this server — a connection out of the sandbox rather
+than into it — so it works at a site that forbids `condor_ssh_to_job`
+entirely.
+
+Nothing that only *reads* a job is affected: the queue, the history,
+output files and the live tail all go through the schedd and the
+starter's peek interface, not through a shell.
+
+Setting this leaves `HTTP_API_INTERACTIVE_VSCODE` and
+`HTTP_API_INTERACTIVE_TERMINAL` with nothing to decide; they are forced
+off and need not be set. Unlike those two, this one is **read at
+startup**: the gateway's listener is built then, and a setting that
+closed the tool surface while leaving the port open would be the worst
+of both. Changing it needs a restart, and a reconfigure says so.
+
 ## Which applications this access point offers
 
 All three are offered unless the installation says otherwise:

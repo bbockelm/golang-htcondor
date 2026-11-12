@@ -936,9 +936,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		if s.toolDisabled(t.Name) {
 			continue
 		}
-		// Likewise an access point that does not offer interactive
-		// sessions: that is not a decision about who is asking either.
-		if t.Name == "interactive_session_start" && !s.interactiveSessionsOffered() {
+		// Likewise what the ACCESS POINT does not offer -- interactive
+		// sessions, or anything that reaches into a running job. Not a
+		// decision about who is asking either.
+		if _, withheld := s.toolWithheldBySite(t.Name); withheld {
 			continue
 		}
 		if scopesAllowTool(grant, t.Name) {
@@ -1005,11 +1006,11 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		return nil, err
 	}
 
-	// And the same for starting a session where the site offers none: a
-	// client may hold a catalogue from before the setting changed.
-	if request.Name == "interactive_session_start" && !s.interactiveSessionsOffered() {
-		err := errInteractiveSessionsNotOffered()
-		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: this access point offers no interactive sessions",
+	// And the same for what the access point does not offer: a client
+	// may hold a catalogue from before the setting changed.
+	if reason, withheld := s.toolWithheldBySite(request.Name); withheld {
+		err := fmt.Errorf(reason, request.Name)
+		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: not offered by this access point",
 			"tool", request.Name, "trace_id", traceID)
 		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, err

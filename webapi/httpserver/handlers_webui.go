@@ -106,6 +106,16 @@ type AuthMeResponse struct {
 	// app this does not list is refused regardless of what the SPA does
 	// with it.
 	Interactive []string `json:"interactive,omitempty"`
+	// SSHToJob reports whether anything may reach into a running job
+	// here, so the job page can leave out its terminal rather than
+	// offer one that cannot connect.
+	//
+	// Not omitempty, unlike its neighbours: this is normally TRUE, so
+	// omitting the false case would make "not allowed" and "a server
+	// too old to say" the same answer -- and the SPA has to tell them
+	// apart, since one hides a working feature and the other offers a
+	// broken one.
+	SSHToJob bool `json:"ssh_to_job"`
 }
 
 // PlacementSessionInfo is the placement identity of a session.
@@ -195,6 +205,7 @@ func (s *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// the data it renders cannot disagree about what is withheld.
 	resp.Reservations = s.reservationsEnabled
 	resp.Interactive = s.interactive.offered()
+	resp.SSHToJob = s.sshToJobEnabled()
 	resp.PoolIdentityRestricted = s.poolQueryPolicy.Restricts(s.seesAllJobs(r.Context(), r, jobScopeRead))
 
 	s.writeJSON(w, http.StatusOK, resp)

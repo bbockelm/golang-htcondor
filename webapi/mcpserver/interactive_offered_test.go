@@ -104,3 +104,70 @@ func TestAZeroServerOffersSessions(t *testing.T) {
 		t.Error("a Server nobody configured offers no interactive sessions")
 	}
 }
+
+func noSSHServer(t *testing.T) *Server {
+	t.Helper()
+	s, err := NewServer(Config{
+		ScheddName:         "test",
+		ScheddAddr:         "127.0.0.1:9618",
+		SSHToJobNotOffered: true,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+// A site that forbids condor_ssh_to_job forbids it however the request
+// is dressed, and an agent is a way of dressing it.
+func TestForbiddingSSHWithdrawsTheToolsThatEnterAJob(t *testing.T) {
+	got := toolNames(noSSHServer(t))
+	for _, name := range []string{"exec_in_job", "interactive_session_start", "interactive_session_exec"} {
+		if got[name] {
+			t.Errorf("%s is offered where nothing may reach into a job", name)
+		}
+	}
+	// Listing reads the queue and stopping removes a job: neither
+	// touches a sandbox, and withdrawing them would leave an agent
+	// holding sessions it could not clean up.
+	for _, name := range []string{"interactive_session_list", "interactive_session_stop"} {
+		if !got[name] {
+			t.Errorf("%s was withheld; it touches no sandbox", name)
+		}
+	}
+	// Reading a job is not reaching into one: output comes from the
+	// spool, and the tail from the starter's peek interface.
+	for _, name := range []string{"get_job_output", "tail_job_output", "query_jobs"} {
+		if !got[name] {
+			t.Errorf("%s was withheld; reading a job does not reach into it", name)
+		}
+	}
+}
+
+// Refused on dispatch too, naming the setting and saying what is left.
+func TestForbiddingSSHRefusesTheCall(t *testing.T) {
+	s := noSSHServer(t)
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "exec_in_job",
+		"arguments": map[string]interface{}{"job_id": "1.0", "command": "hostname"},
+	})
+	_, err := s.handleCallTool(context.Background(), params)
+	if err == nil {
+		t.Fatal("exec_in_job was dispatched where nothing may reach into a job")
+	}
+	if !strings.Contains(err.Error(), "HTTP_API_SSH_TO_JOB") {
+		t.Errorf("the error does not name the setting: %v", err)
+	}
+	if !strings.Contains(err.Error(), "output and files are still readable") {
+		t.Errorf("the error does not say what is left: %v", err)
+	}
+}
+
+// Allowed unless the site says otherwise, for a Server built as a
+// literal as much as for one built from a Config.
+func TestReachingIntoAJobIsOfferedByDefault(t *testing.T) {
+	var s Server
+	if reason, withheld := s.toolWithheldBySite("exec_in_job"); withheld {
+		t.Errorf("a server nobody configured withholds exec_in_job: %s", reason)
+	}
+}

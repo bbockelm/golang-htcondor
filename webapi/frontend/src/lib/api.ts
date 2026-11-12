@@ -205,6 +205,12 @@ export interface Session {
   // none, and the Interactive item leaves the navigation with them.
   // Advisory: launching one it does not list is refused by the server.
   interactive?: InteractiveApp[];
+  // Whether anything may reach into a running job here: the terminal on
+  // the job page, and the applications served through the job proxy.
+  // Always sent by a server that knows about it, so absent means a
+  // server too old to say and is read as allowed. Reading a job --
+  // output, files, live tail -- does not depend on it.
+  ssh_to_job?: boolean;
   // The site withholds who is running on a slot from this session.
   // Advisory: it decides what the pool pages ask for and what they say,
   // while the server enforces the rule on every collector read.
