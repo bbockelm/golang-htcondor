@@ -48,6 +48,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/reservation"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
 	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
 	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/templates"
@@ -423,7 +424,16 @@ type Handler struct {
 	mcpSkillsDir              string // Directory of site-authored Markdown skills (empty disables)
 	// How often that directory is re-read; zero leaves reloads to reconfigure.
 	mcpSkillsReloadInterval time.Duration
-	mcpAdminUsers           []string // Authenticated subjects exempt from the MCP owner-scope wrapper
+	siteAppsReloadInterval  time.Duration
+	// webuiAppOnlyGroups are the groups whose members land in their site
+	// app rather than the dashboard, with the stock navigation
+	// collapsed. Presentation, never authorization.
+	webuiAppOnlyGroups *groupSet
+	// siteApps serves operator-deployed static web apps under /site/.
+	// nil when HTTP_API_SITE_APPS_DIR is unset, which leaves the whole
+	// feature -- routes included -- out of the server.
+	siteApps      *siteapps.Library
+	mcpAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// poolQueryPolicy restricts which collector attributes an
 	// unprivileged caller reads. Never nil after NewHandler; an
 	// unconfigured server holds an open policy.
@@ -1138,6 +1148,28 @@ type HandlerConfig struct {
 	// MCPRedactDisabledRules (HTTP_API_MCP_REDACT_DISABLED_RULES) names
 	// masking rules to turn off, as globs over rule ids.
 	MCPRedactDisabledRules string
+	// WebUIAppOnlyGroup names the groups whose members are sent to their
+	// site app instead of the dashboard, and whose stock navigation
+	// collapses to their apps. Comma-separated;
+	// HTTP_API_WEBUI_APP_ONLY_GROUP.
+	//
+	// This is presentation and NOT authorization. The API is unchanged,
+	// every page stays reachable by typing its URL, and the expert-mode
+	// link opens the full console for the session. It exists so a
+	// non-technical user does not meet a general-purpose batch console
+	// they did not ask for -- not to stop a determined one reaching it.
+	// Documentation must never describe it as a restriction, or someone
+	// will eventually rely on it as one.
+	WebUIAppOnlyGroup string
+	// SiteAppsDir holds <id>.zip bundles. Who may see each one is read
+	// from HTCondorConfig (HTTP_API_SITE_APP_<ID>_GROUPS), not from
+	// the directory. Empty disables site apps entirely: no library is
+	// built and no /site/ route is registered.
+	SiteAppsDir string
+	// SiteAppsReloadInterval is how often that directory is rescanned,
+	// so dropping a new bundle in place needs no restart and no signal.
+	// Zero selects defaultSiteAppsReload.
+	SiteAppsReloadInterval time.Duration
 	// MCPSkillsReloadInterval is how often to re-read MCPSkillsDir.
 	MCPSkillsReloadInterval time.Duration
 	// MCPSkillsDir is a directory of site-authored Markdown skills to
@@ -2050,6 +2082,13 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	h.webuiAdminGroups = newGroupSet(cfg.WebUIAdminGroup)
 	h.webuiAccessGroups = newGroupSet(cfg.WebUIAccessGroup)
+
+	// Built here rather than in Start because setupRoutes decides
+	// whether to register /site/ on whether this is non-nil, and that
+	// runs before there is a context for the rescan goroutine.
+	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
+	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
+	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir, cfg.HTCondorConfig)
 	h.branding = newBrandingState(logger, brandingOptions{
 		SiteName:    cfg.WebUISiteName,
 		SiteTagline: cfg.WebUISiteTagline,
@@ -2943,6 +2982,10 @@ func (h *Handler) Start(ctx context.Context, ln net.Listener, protocol string) e
 	h.setupRoutes()
 
 	h.ctx, h.cancelFunc = context.WithCancel(ctx) //nolint:gosec // G118: cancelFunc is stored and called during shutdown
+
+	// Rescan the site-app bundle directory until shutdown, so dropping
+	// a new zip in place needs neither a restart nor a signal.
+	h.runSiteAppReloads(h.ctx, h.siteAppsReloadInterval)
 
 	if h.multi != nil {
 		return h.startMultiAPHandler(ln, protocol)

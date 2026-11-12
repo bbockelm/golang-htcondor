@@ -1718,6 +1718,39 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 // to the bare key. condor_master always passes -local-name <NAME>
 // when starting custom DC daemons, so honoring it here keeps us
 // consistent with how every other HTCondor daemon resolves config.
+// loadSiteAppsConfig reads where site-app bundles live and how often to
+// rescan.
+//
+// Shared by the normal and demo paths rather than inlined in one of
+// them. Demo mode builds its own ServerConfig from scratch, so anything
+// read only in the normal path is silently absent there -- which is how
+// the browser harness came to deploy a bundle the demo server never
+// looked at.
+func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, time.Duration) {
+	// A directory of <id>.zip bundles, each with an <id>.yaml policy
+	// file beside it naming the groups that may see it. Unset leaves
+	// the feature out of the server entirely.
+	dir := ""
+	if raw, ok := cfg.Get("HTTP_API_SITE_APPS_DIR"); ok && strings.TrimSpace(raw) != "" {
+		dir = strings.TrimSpace(raw)
+		logger.Info(logging.DestinationHTTP, "Site apps directory configured", "dir", dir)
+	}
+	// How often that directory is rescanned. Deploying a bundle is an
+	// scp by somebody who is about to reload the page, and nothing
+	// outside this process can signal the daemon, so the daemon looks.
+	reload := time.Duration(0)
+	if raw, ok := cfg.Get("HTTP_API_SITE_APPS_RELOAD_INTERVAL"); ok && strings.TrimSpace(raw) != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil && d > 0 {
+			reload = d
+		} else {
+			logger.Error(logging.DestinationHTTP,
+				"HTTP_API_SITE_APPS_RELOAD_INTERVAL is not a positive duration; using the default",
+				"value", raw)
+		}
+	}
+	return dir, reload
+}
+
 func loadConfigWithDefaults() (*config.Config, error) {
 	cfg, err := config.NewWithOptions(config.ConfigOptions{
 		Subsystem: "HTTP_API",
@@ -2187,6 +2220,15 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// HTTP_API_MCP_ACCESS_GROUP, which is what gated the browser before
 	// these were separate knobs.
 	webuiAccessGroup, _ := cfg.Get("HTTP_API_WEBUI_ACCESS_GROUP")
+
+	// Site apps: a directory of <id>.zip bundles, each with an
+	// <id>.yaml policy file beside it naming the groups that may see
+	// it. Unset leaves the feature out of the server entirely.
+	// Groups whose members land in their site app rather than the
+	// dashboard. Presentation only -- it restricts nothing.
+	webuiAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
+
+	siteAppsDir, siteAppsReload := loadSiteAppsConfig(cfg, logger)
 	// Site branding. Every one of these is optional; unset leaves the
 	// web UI exactly as it ships. See webapi/httpserver/branding.go.
 	webuiSiteName, _ := cfg.Get("HTTP_API_WEBUI_SITE_NAME")
@@ -2502,6 +2544,9 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		PoolQueryPolicy:            poolpolicy.New(mcpCfg.poolQueryMode, mcpCfg.poolQueryExtraAttrs),
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
+		WebUIAppOnlyGroup:          webuiAppOnlyGroup,
+		SiteAppsDir:                siteAppsDir,
+		SiteAppsReloadInterval:     siteAppsReload,
 		WebUISiteName:              webuiSiteName,
 		WebUISiteTagline:           webuiSiteTagline,
 		WebUIFooterLogos:           webuiFooterLogos,
@@ -2784,6 +2829,13 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		return fmt.Errorf("failed to load HTCondor configuration: %w", err)
 	}
 
+	// Read the same way the normal path does. config.New applies
+	// _CONDOR_<PARAM> environment overrides last, so a harness can
+	// point a throwaway demo server at a bundle directory without
+	// writing a configuration file.
+	demoSiteAppsDir, demoSiteAppsReload := loadSiteAppsConfig(cfg, logger)
+	demoAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
+
 	// Start condor_master
 	log.Println("Starting condor_master...")
 	condorMaster, err := startCondorMaster(context.Background(), configFile)
@@ -2937,6 +2989,12 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// to check authorization boundaries against.
 		SeedDemoUser:        true,
 		DemoCredentialsFile: *demoCredsFile,
+		// Site apps are honoured in demo mode too, so a site can try a
+		// bundle against a throwaway server and so the browser tests
+		// have something to drive.
+		SiteAppsDir:            demoSiteAppsDir,
+		SiteAppsReloadInterval: demoSiteAppsReload,
+		WebUIAppOnlyGroup:      demoAppOnlyGroup,
 		// With a placementd: an account with no access, to show the
 		// request-access flow, and the identity map that sends it there.
 		SeedDemoPlacementUser: placement != nil,

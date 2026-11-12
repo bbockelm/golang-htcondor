@@ -5,6 +5,7 @@ import (
 
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
 )
 
 // setupRoutes sets up all HTTP routes for the Handler.
@@ -84,7 +85,11 @@ func (h *Handler) setupRoutes() {
 	// otherwise fall back to the legacy welcome page.
 	if webui.IsEmbedded() {
 		spa := webui.NewSPAHandler(webui.WithBranding(h.branding.current))
-		mux.Handle("/", spa)
+		// An app-only session lands on its app rather than the
+		// dashboard. Presentation, not authorization: the wrapper only
+		// redirects page navigations, and the expert door below turns
+		// it off for the session.
+		mux.Handle("/", h.appOnlyRedirect(spa))
 	} else {
 		mux.HandleFunc("/", h.handleWelcome)
 	}
@@ -98,6 +103,21 @@ func (h *Handler) setupRoutes() {
 	mux.Handle(brandingPath, cors(http.HandlerFunc(h.handleWebUIBranding)))
 	mux.HandleFunc(webui.CSSPath, h.handleBrandingCSS)
 	mux.HandleFunc(brandingAssetPrefix, h.handleBrandingAsset)
+
+	// Site apps: operator-deployed static web apps, each gated on the
+	// groups its policy file names. Registered only when a bundle
+	// directory is configured, so a server not using the feature
+	// answers /site/ the way it answers any other unknown path --
+	// through the SPA catch-all above.
+	//
+	// ServeMux prefers the longer pattern, so this wins over "/"
+	// regardless of registration order.
+	if h.siteApps != nil {
+		// The expert door, registered before the subtree so it wins:
+		// ServeMux prefers the longer, more specific pattern.
+		mux.HandleFunc("/site/expert", h.handleExpertMode)
+		mux.Handle("/site/", siteapps.NewHandler(h.siteApps, h.siteAppCaller, h.siteAppLogin))
+	}
 
 	// /.well-known/ is discovery space, never SPA content. Without this
 	// the root handler above answers every unregistered probe under it

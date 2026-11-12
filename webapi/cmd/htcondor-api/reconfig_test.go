@@ -34,6 +34,7 @@ func (f *fakeTarget) SetMCPAdminGroups(v string)     { f.record("mcp_admin", v) 
 func (f *fakeTarget) SetMCPSuperuserGroups(v string) { f.record("mcp_superuser", v) }
 func (f *fakeTarget) SetWebUIAccessGroups(v string)  { f.record("webui_access", v) }
 func (f *fakeTarget) SetWebUIAdminGroups(v string)   { f.record("webui_admin", v) }
+func (f *fakeTarget) SetWebUIAppOnlyGroups(v string) { f.record("webui_app_only", v) }
 func (f *fakeTarget) SetWebUISiteName(v string)      { f.record("webui_site_name", v) }
 func (f *fakeTarget) SetWebUISiteTagline(v string)   { f.record("webui_site_tagline", v) }
 func (f *fakeTarget) SetWebUIFooterLogos(v string)   { f.record("webui_footer_logos", v) }
@@ -42,7 +43,11 @@ func (f *fakeTarget) SetWebUICustomCSS(v string)     { f.record("webui_custom_cs
 func (f *fakeTarget) SetWebUIFavicon(v string)       { f.record("webui_favicon", v) }
 func (f *fakeTarget) SetSuperuserGroups(v string)    { f.record("superuser", v) }
 func (f *fakeTarget) SetMCPSkillsDir(v string)       { f.record("skills_dir", v) }
-func (f *fakeTarget) SetMCPDisabledTools(v string)   { f.record("disabled_tools", v) }
+
+// SetSiteAppPolicy records that the whole policy was re-read, which is
+// what a reconfigure does with it; there is no single value to record.
+func (f *fakeTarget) SetSiteAppPolicy(*config.Config) { f.record("site_app_policy", "reread") }
+func (f *fakeTarget) SetMCPDisabledTools(v string)    { f.record("disabled_tools", v) }
 
 func (f *fakeTarget) SetMCPRedactSecrets(v string)       { f.record("redact_secrets", v) }
 func (f *fakeTarget) SetMCPRedactDisabledRules(v string) { f.record("redact_disabled_rules", v) }

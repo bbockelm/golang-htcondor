@@ -156,6 +156,11 @@ func (h *Handler) SetMCPSuperuserGroups(raw string) { h.mcpSuperuserGroups.set(r
 // interface. Emptying it restores the fallback to the MCP access groups.
 func (h *Handler) SetWebUIAccessGroups(raw string) { h.webuiAccessGroups.set(raw) }
 
+// SetWebUIAppOnlyGroups installs the groups whose members land in their
+// site app rather than the dashboard. Reloadable for the same reason
+// the others are: a site adds a lab mid-semester.
+func (h *Handler) SetWebUIAppOnlyGroups(raw string) { h.webuiAppOnlyGroups.set(raw) }
+
 // SetWebUIAdminGroups installs the groups required for the admin pages.
 //
 // Emptying it disables the admin UI, which is what an empty value has

@@ -5,7 +5,6 @@ import (
 	"context"
 
 	"encoding/json"
-	"github.com/PelicanPlatform/classad/collections/crypt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PelicanPlatform/classad/collections/crypt"
 )
 
 // A token is bound to the person and to the request it was minted for.

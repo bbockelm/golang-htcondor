@@ -140,11 +140,36 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
 
 // --- Types ---
 
+// A site app: a static web app an operator deployed, served under /site/.
+export interface SiteApp {
+  id: string;
+  name: string;
+  url: string;
+  // Members land here instead of the dashboard. More than one app may
+  // say so for the same person, which is why /site/ exists.
+  home?: boolean;
+  description?: string;
+  icon?: string;
+}
+
 export interface Session {
   authenticated: boolean;
   username?: string;
   groups?: string[];
   is_admin: boolean;
+  // Operator-deployed web apps this session may see, already filtered by
+  // group on the server. The server is the only thing that decides this:
+  // the same list drives the sidebar, the switcher at /site/ and the gate
+  // on /site/{id}/, so none of them can disagree about who sees what.
+  site_apps?: SiteApp[];
+  // This session is normally sent to its app instead of the dashboard,
+  // so the navigation collapses to the apps plus a way back. It
+  // restricts nothing: every page is still reachable by typing its URL,
+  // and the API is untouched.
+  app_only?: boolean;
+  // The session stepped through the expert door and is looking at the
+  // full console on purpose, so offer the way back to the app.
+  expert_active?: boolean;
   // May this session arm superuser mode? Configured feature + membership in
   // HTTP_API_SUPERUSER_GROUP, which is deliberately not the admin-UI group.
   superuser_allowed?: boolean;

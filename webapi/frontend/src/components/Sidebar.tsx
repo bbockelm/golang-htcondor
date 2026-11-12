@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { api, type SiteApp } from '@/lib/api';
 import { useBranding } from '@/lib/branding';
 import { placementAdmin } from '@/lib/placementAdmin';
 import { CountBadge } from './CountBadge';
@@ -23,6 +23,15 @@ interface SidebarProps {
   // This server runs the reservation subsystem, so its admin page is
   // offered. Off unless configured.
   reservations?: boolean;
+  // Operator-deployed web apps this session may see. Server-filtered;
+  // the sidebar renders what it is given and decides nothing.
+  siteApps?: SiteApp[];
+  // Collapse the general-purpose navigation: this session is meant to
+  // be in its app. Presentation only -- nothing here restricts access.
+  appOnly?: boolean;
+  // The session opened the full console deliberately, so show the way
+  // back rather than only the way out.
+  expertActive?: boolean;
   // This session can request a placement token.
   placement?: boolean;
   // A placement-assigned account's projects and the selected one.
@@ -80,6 +89,9 @@ export function Sidebar({
   superuserActive,
   multiAP,
   reservations,
+  siteApps,
+  appOnly,
+  expertActive,
   placement,
   placementProjects,
   placementProject,
@@ -146,7 +158,11 @@ export function Sidebar({
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">
-          {[...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])].map((item) => (
+          {/* An app-only session does not get the general-purpose
+              console in its navigation unless it asked for it. The
+              pages still exist and still work if typed. */}
+          {(!appOnly || expertActive) &&
+            [...(multiAP ? MULTI_AP_NAV : NAV), ...(placement ? PLACEMENT_NAV : [])].map((item) => (
             <NavLink
               key={item.href}
               href={item.href}
@@ -156,6 +172,53 @@ export function Sidebar({
               {item.label}
             </NavLink>
           ))}
+
+          {appOnly && !expertActive && (
+            // The door out. A visible link rather than a query
+            // parameter somebody has to be told about: the mechanism is
+            // the same, and a hidden one becomes folklore.
+            <a
+              href="/site/expert"
+              data-testid="expert-mode"
+              className="mt-5 block rounded-sm px-3 py-2 text-sm text-gray-400 hover:bg-white/10 hover:text-white"
+            >
+              Expert mode
+            </a>
+          )}
+
+          {appOnly && expertActive && (
+            <a
+              href="/site/expert?close=1"
+              data-testid="leave-expert-mode"
+              className="mt-5 block rounded-sm px-3 py-2 text-sm text-gray-400 hover:bg-white/10 hover:text-white"
+            >
+              Back to my apps
+            </a>
+          )}
+
+          {siteApps && siteApps.length > 0 && (
+            <>
+              <div className="mb-1 mt-5 px-3 text-[10px] uppercase tracking-wider text-gray-500">
+                Apps
+              </div>
+              {siteApps.map((app) => (
+                // A plain anchor, not next/link: a site app is a
+                // separate document served by the access point, not a
+                // route in this export. Routing to it client-side would
+                // ask Next for a page that does not exist here.
+                <a
+                  key={app.id}
+                  href={app.url}
+                  onClick={onClose}
+                  title={app.description}
+                  data-testid={`site-app-${app.id}`}
+                  className="block rounded-sm px-3 py-2 text-sm text-gray-300 hover:bg-white/10 hover:text-white"
+                >
+                  {app.name}
+                </a>
+              ))}
+            </>
+          )}
 
           {isAdmin && (
             <>
