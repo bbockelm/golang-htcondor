@@ -55,9 +55,7 @@ var guideToolMentions = sync.OnceValue(func() map[string][]string {
 		}
 		seen := map[string]bool{}
 		var names []string
-		for _, word := range strings.FieldsFunc(string(b), func(r rune) bool {
-			return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
-		}) {
+		for _, word := range strings.FieldsFunc(string(b), notIdentifierRune) {
 			if known[word] && !seen[word] {
 				seen[word] = true
 				names = append(names, word)
@@ -68,6 +66,15 @@ var guideToolMentions = sync.OnceValue(func() map[string][]string {
 	}
 	return out
 })
+
+// notIdentifierRune splits the text into the words a tool name could
+// be: letters, digits and underscore.
+func notIdentifierRune(r rune) bool {
+	return r != '_' &&
+		(r < 'a' || r > 'z') &&
+		(r < 'A' || r > 'Z') &&
+		(r < '0' || r > '9')
+}
 
 // offeredToolNames is the set of tools this caller is served.
 //
