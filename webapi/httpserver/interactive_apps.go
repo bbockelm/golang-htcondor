@@ -107,8 +107,12 @@ func (a *interactiveApps) set(app interactiveApp, on bool) {
 // Interactive page shows them. Published by /auth/me so the SPA renders
 // what exists rather than probing three endpoints to find out, and so
 // an empty list can take the navigation item away with it.
+//
+// Never nil, so that "offers none" serialises as [] rather than null:
+// the SPA tells an empty list from a missing field, and they mean
+// opposite things. See AuthMeResponse.Interactive.
 func (a *interactiveApps) offered() []string {
-	var out []string
+	out := make([]string, 0, 3)
 	for _, app := range []interactiveApp{appJupyter, appVSCode, appTerminal} {
 		if a.enabled(app) {
 			out = append(out, string(app))

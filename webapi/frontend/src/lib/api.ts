@@ -201,9 +201,11 @@ export interface Session {
   // it is offered. Advisory: the endpoints refuse regardless when off.
   reservations?: boolean;
   // The built-in interactive applications this access point offers, in
-  // the order the Interactive page shows them. Absent or empty means
-  // none, and the Interactive item leaves the navigation with them.
-  // Advisory: launching one it does not list is refused by the server.
+  // the order the Interactive page shows them. An EMPTY list means none,
+  // and the Interactive item leaves the navigation with them; ABSENT
+  // means a server too old to say, which is read as all three, since
+  // that is what every such server offers. Advisory: launching one the
+  // list does not name is refused by the server.
   interactive?: InteractiveApp[];
   // Whether anything may reach into a running job here: the terminal on
   // the job page, and the applications served through the job proxy.

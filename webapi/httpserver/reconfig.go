@@ -61,30 +61,51 @@ func (h *Handler) SetMCPDisabledTools(spec string) {
 	h.mcpServer.SetDisabledTools(spec)
 }
 
-// SetInteractiveJupyter, SetInteractiveVSCode and SetInteractiveTerminal
-// turn one of the three built-in interactive applications on or off.
+// reconfigOffered reads a setting for a feature that is ON unless the
+// operator turns it off, returning that default for an empty or
+// unparseable value and saying so in the log.
 //
-// Dynamic because nothing is constructed from them: each is a check made
-// when a session is created, and the list /auth/me publishes is read per
-// request, so a reconfigure reaches the next launch and the next page
-// load. The alternative -- restarting the daemon -- drops every live
-// notebook and terminal to stop new ones being made, which is the
-// opposite of what these settings are careful about.
+// Deliberately not reconfigBool(name, spec, true): there the default is
+// the caller's to choose, and it is chosen differently by different
+// settings. Here it is the same for all three, and a parameter that
+// every caller passes the same value to is one a reader has to check.
+func (h *Handler) reconfigOffered(name, spec string) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(spec)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP,
+			"Reconfigure: ignoring a setting that is not a boolean; the feature stays offered",
+			"setting", name, "value", spec)
+		return true
+	}
+	return v
+}
+
+// SetInteractiveJupyter turns the JupyterLab application on or off.
 //
-// Default true on an unparseable or empty value, matching the startup
-// default: these have always been served, and an operator who meant to
-// turn one off and mistyped is told so in the log rather than having it
-// happen.
+// This and the two below are dynamic because nothing is constructed
+// from them: each is a check made when a session is created, and the
+// list /auth/me publishes is read per request, so a reconfigure reaches
+// the next launch and the next page load. The alternative -- restarting
+// the daemon -- drops every live notebook and terminal to stop new ones
+// being made, which is the opposite of what these settings are careful
+// about.
 func (h *Handler) SetInteractiveJupyter(spec string) {
-	h.interactive.set(appJupyter, h.reconfigBool("HTTP_API_INTERACTIVE_JUPYTER", spec, true))
+	h.interactive.set(appJupyter, h.reconfigOffered("HTTP_API_INTERACTIVE_JUPYTER", spec))
 }
 
+// SetInteractiveVSCode turns the VS Code application on or off.
 func (h *Handler) SetInteractiveVSCode(spec string) {
-	h.interactive.set(appVSCode, h.reconfigBool("HTTP_API_INTERACTIVE_VSCODE", spec, true))
+	h.interactive.set(appVSCode, h.reconfigOffered("HTTP_API_INTERACTIVE_VSCODE", spec))
 }
 
+// SetInteractiveTerminal turns the Terminal application on or off,
+// and with it the MCP tool that starts the same kind of session.
 func (h *Handler) SetInteractiveTerminal(spec string) {
-	on := h.reconfigBool("HTTP_API_INTERACTIVE_TERMINAL", spec, true)
+	on := h.reconfigOffered("HTTP_API_INTERACTIVE_TERMINAL", spec)
 	h.interactive.set(appTerminal, on)
 	// The MCP interactive-session tools are the other front door onto
 	// the same thing, so they follow it. See interactive_apps.go.

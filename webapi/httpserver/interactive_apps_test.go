@@ -68,7 +68,7 @@ func TestCreatingInADisabledAppIsRefused(t *testing.T) {
 			h.interactive.set(tc.app, false)
 
 			w := httptest.NewRecorder()
-			tc.handle(h, w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			tc.handle(h, w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, nil))
 
 			// 503 and not 403: this is a statement about the
 			// installation, not about the caller, and 403 would send
@@ -89,7 +89,7 @@ func TestDisablingOneAppLeavesTheOthers(t *testing.T) {
 	h := offeringHandler(true, false, true)
 
 	w := httptest.NewRecorder()
-	h.handleAppsPath(w, httptest.NewRequest(http.MethodPost, "/api/v1/apps", nil))
+	h.handleAppsPath(w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/apps", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("VS Code was not refused: status = %d", w.Code)
 	}
@@ -105,7 +105,7 @@ func TestDisablingOneAppLeavesTheOthers(t *testing.T) {
 		{"terminal", "/api/v1/interactive/terminal", (*Handler).handleInteractiveTerminal},
 	} {
 		w := httptest.NewRecorder()
-		tc.fn(h, w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+		tc.fn(h, w, httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, nil))
 		if w.Code == http.StatusServiceUnavailable {
 			t.Errorf("%s was refused by the gate: %s", tc.name, w.Body.String())
 		}
@@ -127,7 +127,7 @@ func TestDisablingAnAppStillListsItsSessions(t *testing.T) {
 		{"terminal", "/api/v1/interactive/terminal", (*Handler).handleInteractiveTerminal},
 	} {
 		w := httptest.NewRecorder()
-		tc.fn(h, w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		tc.fn(h, w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, tc.path, nil))
 		if w.Code == http.StatusServiceUnavailable {
 			t.Errorf("listing %s sessions was refused: %s", tc.name, w.Body.String())
 		}

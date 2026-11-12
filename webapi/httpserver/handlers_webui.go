@@ -102,19 +102,27 @@ type AuthMeResponse struct {
 	// entry leading to three explanations of why nothing can be started
 	// is worse than no entry.
 	//
+	// NOT omitempty, and never nil: "this access point offers none" and
+	// "a server too old to say" must not be the same answer on the
+	// wire. They need opposite handling -- the first hides the
+	// applications, the second has to show them, because every server
+	// before this field offered all three. omitempty made an empty list
+	// absent and so made an old server look like a site that offers
+	// nothing, which hid the applications from every caller of one.
+	//
 	// Advisory, like the rest of this response: creating a session in an
 	// app this does not list is refused regardless of what the SPA does
 	// with it.
-	Interactive []string `json:"interactive,omitempty"`
+	Interactive []string `json:"interactive"`
 	// SSHToJob reports whether anything may reach into a running job
 	// here, so the job page can leave out its terminal rather than
 	// offer one that cannot connect.
 	//
-	// Not omitempty, unlike its neighbours: this is normally TRUE, so
-	// omitting the false case would make "not allowed" and "a server
-	// too old to say" the same answer -- and the SPA has to tell them
-	// apart, since one hides a working feature and the other offers a
-	// broken one.
+	// Not omitempty either, and for the same reason as the field above:
+	// this is normally TRUE, so omitting the false case would make "not
+	// allowed" and "a server too old to say" the same answer, and the
+	// SPA has to tell them apart -- one hides a working feature and the
+	// other offers a broken one.
 	SSHToJob bool `json:"ssh_to_job"`
 }
 
