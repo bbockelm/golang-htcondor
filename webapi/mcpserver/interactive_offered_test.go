@@ -1,0 +1,173 @@
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func sessionServer(t *testing.T, offered bool) *Server {
+	t.Helper()
+	s, err := NewServer(Config{
+		ScheddName:                    "test",
+		ScheddAddr:                    "127.0.0.1:9618",
+		InteractiveSessionsNotOffered: !offered,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+// The hole this closes: a site turns terminals off because its policy
+// forbids interactive shells, and an agent starts one anyway through
+// the other front door.
+func TestStartIsWithheldWhereSessionsAreNotOffered(t *testing.T) {
+	if !toolNames(sessionServer(t, true))["interactive_session_start"] {
+		t.Skip("interactive_session_start is not in this build's catalogue")
+	}
+
+	got := toolNames(sessionServer(t, false))
+	if got["interactive_session_start"] {
+		t.Error("interactive_session_start is offered where the site offers no sessions")
+	}
+	// Only starting goes. An agent holding a session has to be able to
+	// finish with it and stop it, or turning the setting off strands a
+	// job nobody can reach.
+	for _, name := range []string{"interactive_session_list", "interactive_session_exec", "interactive_session_stop"} {
+		if !got[name] {
+			t.Errorf("%s was withheld; only starting a session should be", name)
+		}
+	}
+}
+
+// Withholding it from the catalogue is not enough: a client can hold
+// one from before the setting changed.
+func TestStartIsRefusedWhereSessionsAreNotOffered(t *testing.T) {
+	s := sessionServer(t, false)
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "interactive_session_start",
+		"arguments": map[string]interface{}{"session": "work"},
+	})
+	_, err := s.handleCallTool(context.Background(), params)
+	if err == nil {
+		t.Fatal("a session was started where the site offers none")
+	}
+	if !strings.Contains(err.Error(), "HTTP_API_INTERACTIVE_TERMINAL") {
+		t.Errorf("error does not name the setting: %v", err)
+	}
+	// An agent mid-task must not read this as "your session is gone".
+	if !strings.Contains(err.Error(), "already running can still be listed") {
+		t.Errorf("error does not say existing sessions still work: %v", err)
+	}
+}
+
+// A reconfigure reaches sessions already connected, and turning the
+// setting back on restores the tool.
+func TestInteractiveSessionsFollowReconfigure(t *testing.T) {
+	s := sessionServer(t, true)
+	if !toolNames(s)["interactive_session_start"] {
+		t.Skip("interactive_session_start is not in this build's catalogue")
+	}
+
+	before := s.catalogGen.Load()
+	s.SetInteractiveSessionsOffered(false)
+	if toolNames(s)["interactive_session_start"] {
+		t.Error("the tool survived a reconfigure that withdrew it")
+	}
+	if s.catalogGen.Load() == before {
+		t.Error("the catalogue generation did not move, so cached SDK servers keep offering the tool")
+	}
+
+	s.SetInteractiveSessionsOffered(true)
+	if !toolNames(s)["interactive_session_start"] {
+		t.Error("turning sessions back on did not restore the tool")
+	}
+}
+
+// Offered unless the site says otherwise: a Config built without
+// thinking about this keeps serving what it served.
+func TestInteractiveSessionsDefaultToOffered(t *testing.T) {
+	if !sessionServer(t, true).interactiveSessionsOffered() {
+		t.Error("a server built without the setting offers no sessions")
+	}
+}
+
+// The same for a Server built as a literal, which several tests in this
+// package do. Written the obvious way round, the zero value withholds
+// interactive_session_start and those tests fail on a setting nobody
+// set -- which is exactly what happened while this was being written.
+func TestAZeroServerOffersSessions(t *testing.T) {
+	var s Server
+	if !s.interactiveSessionsOffered() {
+		t.Error("a Server nobody configured offers no interactive sessions")
+	}
+}
+
+func noSSHServer(t *testing.T) *Server {
+	t.Helper()
+	s, err := NewServer(Config{
+		ScheddName:         "test",
+		ScheddAddr:         "127.0.0.1:9618",
+		SSHToJobNotOffered: true,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return s
+}
+
+// A site that forbids condor_ssh_to_job forbids it however the request
+// is dressed, and an agent is a way of dressing it.
+func TestForbiddingSSHWithdrawsTheToolsThatEnterAJob(t *testing.T) {
+	got := toolNames(noSSHServer(t))
+	for _, name := range []string{"exec_in_job", "interactive_session_start", "interactive_session_exec"} {
+		if got[name] {
+			t.Errorf("%s is offered where nothing may reach into a job", name)
+		}
+	}
+	// Listing reads the queue and stopping removes a job: neither
+	// touches a sandbox, and withdrawing them would leave an agent
+	// holding sessions it could not clean up.
+	for _, name := range []string{"interactive_session_list", "interactive_session_stop"} {
+		if !got[name] {
+			t.Errorf("%s was withheld; it touches no sandbox", name)
+		}
+	}
+	// Reading a job is not reaching into one: output comes from the
+	// spool, and the tail from the starter's peek interface.
+	for _, name := range []string{"get_job_output", "tail_job_output", "query_jobs"} {
+		if !got[name] {
+			t.Errorf("%s was withheld; reading a job does not reach into it", name)
+		}
+	}
+}
+
+// Refused on dispatch too, naming the setting and saying what is left.
+func TestForbiddingSSHRefusesTheCall(t *testing.T) {
+	s := noSSHServer(t)
+	params, _ := json.Marshal(map[string]interface{}{
+		"name":      "exec_in_job",
+		"arguments": map[string]interface{}{"job_id": "1.0", "command": "hostname"},
+	})
+	_, err := s.handleCallTool(context.Background(), params)
+	if err == nil {
+		t.Fatal("exec_in_job was dispatched where nothing may reach into a job")
+	}
+	if !strings.Contains(err.Error(), "HTTP_API_SSH_TO_JOB") {
+		t.Errorf("the error does not name the setting: %v", err)
+	}
+	if !strings.Contains(err.Error(), "output and files are still readable") {
+		t.Errorf("the error does not say what is left: %v", err)
+	}
+}
+
+// Allowed unless the site says otherwise, for a Server built as a
+// literal as much as for one built from a Config.
+func TestReachingIntoAJobIsOfferedByDefault(t *testing.T) {
+	var s Server
+	if reason, withheld := s.toolWithheldBySite("exec_in_job"); withheld {
+		t.Errorf("a server nobody configured withholds exec_in_job: %s", reason)
+	}
+}

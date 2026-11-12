@@ -79,6 +79,19 @@ type Server struct {
 	// the caller's scopes say. Atomic for the same reason as the matcher
 	// above. See read_only.go.
 	readOnly atomic.Bool
+	// interactiveSessionsOff is set where this access point does not
+	// offer interactive sessions at all -- the access point's setting
+	// rather than an MCP one, since the web console's Terminal is the
+	// same capability.
+	//
+	// Stated negatively so the zero value offers them, which is what a
+	// Server built as a literal has always done. See
+	// interactive_offered.go.
+	interactiveSessionsOff atomic.Bool
+	// sshToJobOff is set where this access point allows nothing to reach
+	// into a running job (HTTP_API_SSH_TO_JOB = false). Negative for the
+	// same reason as the flag above. See interactive_offered.go.
+	sshToJobOff atomic.Bool
 	// redaction is the credential-masking policy applied to tool
 	// results. Swapped atomically for the same reason. See
 	// redact_tools.go.
@@ -352,6 +365,20 @@ type Config struct {
 	// this binds every caller, including the unscoped ones. See
 	// read_only.go.
 	ReadOnly bool
+	// SSHToJobNotOffered withholds every tool that reaches into a
+	// running job -- exec_in_job and the two session tools that enter
+	// the sandbox -- because this access point allows nothing to
+	// (HTTP_API_SSH_TO_JOB = false). Negative so the zero value allows
+	// it.
+	SSHToJobNotOffered bool
+	// InteractiveSessionsNotOffered withholds interactive_session_start,
+	// because this access point does not offer interactive sessions
+	// (HTTP_API_INTERACTIVE_TERMINAL = false).
+	//
+	// Stated negatively so the zero value offers them, which is what
+	// every server built before the setting existed did. See
+	// interactive_offered.go.
+	InteractiveSessionsNotOffered bool
 	// ToolStats, when set, is told about every tool call: which tool,
 	// for whom, from which client harness, the outcome and how long it
 	// took. Optional -- a nil recorder simply counts nothing, which is
@@ -646,6 +673,8 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetReadOnly(cfg.ReadOnly)
+	s.SetInteractiveSessionsOffered(!cfg.InteractiveSessionsNotOffered)
+	s.SetSSHToJobOffered(!cfg.SSHToJobNotOffered)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)
 	s.SetInstructions(cfg.Instructions)
 	if s.dbMirror == nil && schedd == nil {

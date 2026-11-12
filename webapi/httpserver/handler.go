@@ -279,6 +279,14 @@ type Handler struct {
 	mcpEnabled   bool
 	// reservationsEnabled gates the whole reservation subsystem.
 	reservationsEnabled bool
+	// interactive is which of the three built-in interactive
+	// applications this access point offers. See interactive_apps.go.
+	interactive interactiveApps
+	// sshToJobOff is set where this access point allows nothing to reach
+	// into a running job (HTTP_API_SSH_TO_JOB = false). Stated
+	// negatively so the zero value allows it, and atomic because the
+	// gates read it from request goroutines. See ssh_to_job.go.
+	sshToJobOff atomic.Bool
 	// reservationEPConstraint limits which startds reservations may draw
 	// seats from; empty means all of them.
 	reservationEPConstraint string
@@ -910,6 +918,26 @@ type HandlerConfig struct {
 	// of a scheduled window. Off unless configured, because holding
 	// capacity means evicting other people's jobs.
 	Reservations bool
+	// SSHToJobDisabled withdraws everything built on condor_ssh_to_job
+	// (HTTP_API_SSH_TO_JOB = false): the gateway, the console's terminal
+	// on a job, the job proxy and the VS Code app reached through it,
+	// the Terminal application, and the MCP tools that run commands in a
+	// job. See ssh_to_job.go.
+	//
+	// Stated negatively for the reason the three below are.
+	SSHToJobDisabled bool
+	// InteractiveJupyterDisabled, InteractiveVSCodeDisabled and
+	// InteractiveTerminalDisabled withhold one of the three built-in
+	// interactive applications (HTTP_API_INTERACTIVE_JUPYTER,
+	// _VSCODE, _TERMINAL = false).
+	//
+	// Stated negatively so the zero value is the one every installation
+	// had before these existed: all three offered. A Config built
+	// without thinking about them -- in a test, or by a caller written
+	// earlier -- keeps serving what it served.
+	InteractiveJupyterDisabled  bool
+	InteractiveVSCodeDisabled   bool
+	InteractiveTerminalDisabled bool
 
 	// ReservationStampBudget caps how many cluster ads one stamping
 	// pass writes. Zero takes the package default.
@@ -1613,6 +1641,35 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		logger.Info(logging.DestinationHTTP,
 			"Container build jobs carry extra submit directives",
 			"lines", strings.Count(strings.TrimSpace(h.build.ExtraSubmit), "\n")+1)
+	}
+
+	// Which of the three built-in interactive applications this access
+	// point offers. Set here rather than in the literal above because
+	// they are atomics, read by request goroutines and written by the
+	// reconfigure one; and stated negatively in the config so that the
+	// zero value is "all three", which is what every installation had
+	// before the setting existed.
+	h.sshToJobOff.Store(cfg.SSHToJobDisabled)
+	h.interactive.set(appJupyter, !cfg.InteractiveJupyterDisabled)
+	// A site that allows nothing into a running job cannot offer the two
+	// applications that work by reaching into one: a terminal IS an
+	// ssh-to-job session, and VS Code is served through the job proxy,
+	// which rides the same transport. Forced here rather than left to
+	// the operator to set as well, because the alternative is an
+	// application that is offered, submits a job, and fails at the
+	// connect. JupyterLab is not forced: its tunnel is dialled out of
+	// the sandbox, so it works where ssh-to-job does not.
+	h.interactive.set(appVSCode, !cfg.InteractiveVSCodeDisabled && !cfg.SSHToJobDisabled)
+	h.interactive.set(appTerminal, !cfg.InteractiveTerminalDisabled && !cfg.SSHToJobDisabled)
+	if cfg.SSHToJobDisabled {
+		logger.Info(logging.DestinationHTTP,
+			"This access point allows nothing to reach into a running job (HTTP_API_SSH_TO_JOB = false): "+
+				"no SSH gateway, job terminal, job proxy, VS Code or terminal application, and no MCP tools that run commands in a job")
+	}
+	if offered := h.interactive.offered(); len(offered) < 3 {
+		logger.Info(logging.DestinationHTTP,
+			"Interactive applications offered by this access point",
+			"apps", strings.Join(offered, " "))
 	}
 
 	// Independent of the extras block: an operator may constrain where
@@ -2545,6 +2602,12 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
 		ReadOnly:       h.mcpReadOnly.Load(),
+		// The access point's own settings, not MCP ones: the MCP session
+		// tools and the console's Terminal are one capability, and what
+		// may reach into a running job is the site's decision however
+		// the request is dressed.
+		InteractiveSessionsNotOffered: !h.interactive.enabled(appTerminal),
+		SSHToJobNotOffered:            !h.sshToJobEnabled(),
 
 		DisableSecretRedaction: h.mcpDisableSecretRedaction,
 		RedactDisabledRules:    h.mcpRedactDisabledRules,

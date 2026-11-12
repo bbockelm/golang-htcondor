@@ -1435,6 +1435,31 @@ func reservationsEnabled(cfg *config.Config) bool {
 	return v
 }
 
+// featureOffered reports whether a feature this access point has always
+// had is still offered.
+//
+// ON unless the operator says otherwise, which is the opposite of
+// reservationsEnabled above and for the opposite reason: these have
+// always been served, and a site that upgrades into this change must
+// not quietly lose the notebooks its users were running yesterday. The
+// caller states the result negatively (Disabled) so that the zero value
+// of a Config carries the same default.
+//
+// Unparseable is fatal, as every other boolean here is: the two ways to
+// misread the setting are "offered" and "not offered", and a daemon
+// that guesses should not come up.
+func featureOffered(cfg *config.Config, param string) bool {
+	raw, ok := cfg.Get(param)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		log.Fatalf("invalid %s=%q: must be a boolean", param, raw)
+	}
+	return v
+}
+
 // reservationClaimsEnabled reports whether HTTP_API_RESERVATION_CLAIMS
 // turns on holding always-on reservations as the schedd's persistent
 // claims instead of as machine attributes.
@@ -2593,13 +2618,23 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		JobQueueLogPath:         jobQueueLogPath,
 		DagmanEnvironment:       loadDagmanEnvironment(cfg, logger),
 		InteractiveRequirements: loadInteractiveRequirements(cfg, logger),
-		VSCodeImage:             firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
-		Build:                   loadBuildConfig(cfg, logger),
-		DBMirrorTokenSubject:    firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
-		SubmitFileDefaults:      loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
-		SubmitFileOverrides:     loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
-		TemplateGlobalPath:      loadTemplateGlobalPath(cfg),
-		HTCondorConfig:          cfg,
+		// Whether anything may reach into a running job at all. Allowed
+		// unless the operator says otherwise; where it is not, the two
+		// applications built on it are withdrawn with it.
+		SSHToJobDisabled: !featureOffered(cfg, "HTTP_API_SSH_TO_JOB"),
+		// Which of the three built-in interactive applications this
+		// access point offers. All three unless the operator says
+		// otherwise.
+		InteractiveJupyterDisabled:  !featureOffered(cfg, "HTTP_API_INTERACTIVE_JUPYTER"),
+		InteractiveVSCodeDisabled:   !featureOffered(cfg, "HTTP_API_INTERACTIVE_VSCODE"),
+		InteractiveTerminalDisabled: !featureOffered(cfg, "HTTP_API_INTERACTIVE_TERMINAL"),
+		VSCodeImage:                 firstConfigValue(cfg, "HTTP_API_VSCODE_IMAGE"),
+		Build:                       loadBuildConfig(cfg, logger),
+		DBMirrorTokenSubject:        firstConfigValue(cfg, "HTTP_API_DBMIRROR_TOKEN_SUBJECT"),
+		SubmitFileDefaults:          loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_DEFAULTS"),
+		SubmitFileOverrides:         loadSubmitFileLines(cfg, "HTTP_API_SUBMIT_FILE_OVERRIDES"),
+		TemplateGlobalPath:          loadTemplateGlobalPath(cfg),
+		HTCondorConfig:              cfg,
 		// LLM/chat configuration. Optional; the chat endpoint
 		// returns 503 unless all three (key file, MCP enabled, key
 		// readable) line up. The values are zero-strings when

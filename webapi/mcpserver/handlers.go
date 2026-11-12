@@ -942,6 +942,12 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 		if s.toolWithheldByReadOnly(t.Name) {
 			continue
 		}
+		// Likewise what the ACCESS POINT does not offer -- interactive
+		// sessions, or anything that reaches into a running job. Not a
+		// decision about who is asking either.
+		if _, withheld := s.toolWithheldBySite(t.Name); withheld {
+			continue
+		}
 		if scopesAllowTool(grant, t.Name) {
 			filtered = append(filtered, t)
 		}
@@ -1012,6 +1018,16 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 	if s.toolWithheldByReadOnly(request.Name) {
 		err := errToolReadOnly(request.Name)
 		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: this access point is read-only",
+			"tool", request.Name, "trace_id", traceID)
+		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
+		return nil, err
+	}
+
+	// And the same for what the access point does not offer: a client
+	// may hold a catalogue from before the setting changed.
+	if reason, withheld := s.toolWithheldBySite(request.Name); withheld {
+		err := fmt.Errorf(reason, request.Name)
+		s.logger.Info(logging.DestinationMCP, "MCP tool call refused: not offered by this access point",
 			"tool", request.Name, "trace_id", traceID)
 		s.recordToolCall(ctx, request.Name, toolstatsOutcomeRefused, time.Since(started))
 		return nil, err

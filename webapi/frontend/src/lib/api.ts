@@ -207,6 +207,19 @@ export interface Session {
   // This server runs the reservation subsystem, so the admin page for
   // it is offered. Advisory: the endpoints refuse regardless when off.
   reservations?: boolean;
+  // The built-in interactive applications this access point offers, in
+  // the order the Interactive page shows them. An EMPTY list means none,
+  // and the Interactive item leaves the navigation with them; ABSENT
+  // means a server too old to say, which is read as all three, since
+  // that is what every such server offers. Advisory: launching one the
+  // list does not name is refused by the server.
+  interactive?: InteractiveApp[];
+  // Whether anything may reach into a running job here: the terminal on
+  // the job page, and the applications served through the job proxy.
+  // Always sent by a server that knows about it, so absent means a
+  // server too old to say and is read as allowed. Reading a job --
+  // output, files, live tail -- does not depend on it.
+  ssh_to_job?: boolean;
   // The site withholds who is running on a slot from this session.
   // Advisory: it decides what the pool pages ask for and what they say,
   // while the server enforces the rule on every collector read.
@@ -215,6 +228,9 @@ export interface Session {
   // tokens.
   placement?: PlacementSessionIdentity;
 }
+
+// The built-in interactive applications, as /auth/me names them.
+export type InteractiveApp = 'jupyter' | 'vscode' | 'terminal';
 
 export interface PlacementSessionIdentity {
   identity: string;

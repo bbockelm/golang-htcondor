@@ -156,6 +156,21 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 	if strings.TrimSpace(h.sshGatewayAddress) == "" {
 		return nil
 	}
+	// A gateway exists to put people inside a job. Where the site
+	// allows nothing in, there is nothing for it to do, and a listener
+	// that accepts connections only to refuse them is worse than no
+	// listener: it answers on the port, so it looks configured.
+	//
+	// Not an error, although the address was set on purpose: the two
+	// settings come from different places -- a site profile and a
+	// deployment -- and the one that says "no shells here" is the one
+	// to obey.
+	if !h.sshToJobEnabled() {
+		h.logger.Info(logging.DestinationHTTP,
+			"Not starting the SSH gateway: this access point allows nothing to reach into a running job (HTTP_API_SSH_TO_JOB = false)",
+			"address", h.sshGatewayAddress)
+		return nil
+	}
 	if h.oauth2Provider == nil {
 		return errors.New("the SSH gateway needs the OAuth2 provider, which is not configured; " +
 			"enable MCP/OAuth2 or unset HTTP_API_SSH_GATEWAY_ADDRESS")
@@ -594,6 +609,18 @@ func (h *Handler) sshGatewaySession(ctx context.Context, account string, t sshga
 		return jobssh.Key{}, err
 	} else if info != nil {
 		return h.sshGatewayAwaitRunning(ctx, mgr, caller, name, *info, report)
+	}
+
+	// The third front door onto an interactive session, and the one
+	// easiest to forget: attaching to a session that exists is fine, but
+	// a site that does not offer terminals must not have one made for
+	// somebody because they typed `ssh`. (Where ssh-to-job is off
+	// entirely the gateway does not run at all, and the terminal
+	// application is forced off with it, so this covers that too.)
+	if !h.interactive.enabled(appTerminal) {
+		return jobssh.Key{}, fmt.Errorf(
+			"this access point does not offer terminal sessions (HTTP_API_INTERACTIVE_TERMINAL), so %q cannot be started; "+
+				"connect to a job you already have, as in 12345.0", name)
 	}
 
 	report(fmt.Sprintf("Submitting session %q", name))

@@ -47,6 +47,7 @@ import { SubmitLinesField } from '@/components/SubmitLinesField';
 import { ConfirmButton } from '@/components/ConfirmButton';
 import { SubmitTarget } from '@/components/SubmitTarget';
 import { useKindAssignment, useMultiAP } from '@/lib/multiap';
+import { useInteractiveAppOffered, useInteractiveApps } from '@/lib/interactiveApps';
 
 const DEFAULT_JUPYTER_IMAGE = 'quay.io/jupyter/scipy-notebook:latest';
 
@@ -61,10 +62,26 @@ export default function InteractivePage() {
         </span>
       </div>
 
+      <NoAppsOffered />
       <JupyterSection />
       <VSCodeSection />
       <TerminalSection />
     </div>
+  );
+}
+
+// What the page says when the site offers none of the three. Rendered
+// above the sections, which hide themselves unless the caller still has
+// a session in one -- so this and a leftover session can appear
+// together, which is the honest picture.
+function NoAppsOffered() {
+  const offered = useInteractiveApps();
+  if (offered === undefined || offered.length > 0) return null;
+  return (
+    <p className="rounded-sm border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+      This access point does not offer interactive sessions. Work here is
+      submitted as batch jobs.
+    </p>
   );
 }
 
@@ -73,6 +90,7 @@ export default function InteractivePage() {
 // ----------------------------------------------------------------------
 
 function VSCodeSection() {
+  const offered = useInteractiveAppOffered('vscode');
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -122,6 +140,12 @@ function VSCodeSection() {
 
   const apps = data?.apps ?? [];
 
+  // Not offered here, and nothing of this caller's still running: the
+  // section has nothing left to say, so it goes rather than explaining
+  // itself. It stays while a session is listed, because a session the
+  // site has stopped offering is still the user's to open and to stop.
+  if (offered === false && !isLoading && apps.length === 0) return null;
+
   return (
     <SectionCard
       title="VS Code"
@@ -138,43 +162,50 @@ function VSCodeSection() {
       )}
       {apps.length > 0 && <VSCodeTable apps={apps} />}
 
-      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
-        <div className="text-sm font-medium text-gray-700">Launch new</div>
-        <Field label="Container image (optional)">
-          <input
-            type="text"
-            value={image}
-            onChange={(e) => setImage(e.target.value)}
-            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
-            placeholder="leave blank for this pool's default"
-          />
-          <p className="mt-1 text-xs text-gray-500">
-            Ignored if your administrator has pinned an image. Extensions
-            baked into an image are available in every session; ones you
-            install by hand are reinstalled each time.
-          </p>
-        </Field>
-        <Field label="Folder to open (optional)">
-          <input
-            type="text"
-            value={workdir}
-            onChange={(e) => setWorkdir(e.target.value)}
-            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
-            placeholder="the job's scratch directory"
-          />
-        </Field>
-        <ResourceRequestPanel value={resources} onChange={setResources} />
-        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} label="Access point for VS Code" />
-        {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
-        <button
-          onClick={() => submit.mutate()}
-          disabled={submit.isPending || target.blocked}
-          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-        >
-          {submit.isPending ? 'Submitting…' : 'Launch VS Code'}
-        </button>
-      </div>
+      {offered === false ? (
+        <p className="rounded-sm border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+          This access point does not offer VS Code sessions. Any session
+          listed above is still yours to use and to stop.
+        </p>
+      ) : (
+        <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
+          <div className="text-sm font-medium text-gray-700">Launch new</div>
+          <Field label="Container image (optional)">
+            <input
+              type="text"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+              className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+              placeholder="leave blank for this pool's default"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Ignored if your administrator has pinned an image. Extensions
+              baked into an image are available in every session; ones you
+              install by hand are reinstalled each time.
+            </p>
+          </Field>
+          <Field label="Folder to open (optional)">
+            <input
+              type="text"
+              value={workdir}
+              onChange={(e) => setWorkdir(e.target.value)}
+              className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+              placeholder="the job's scratch directory"
+            />
+          </Field>
+          <ResourceRequestPanel value={resources} onChange={setResources} />
+          <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+          <LaunchTarget target={target} label="Access point for VS Code" />
+          {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
+          <button
+            onClick={() => submit.mutate()}
+            disabled={submit.isPending || target.blocked}
+            className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+          >
+            {submit.isPending ? 'Submitting…' : 'Launch VS Code'}
+          </button>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -277,6 +308,7 @@ function vscodeStateLabel(state: string): string {
 // ----------------------------------------------------------------------
 
 function JupyterSection() {
+  const offered = useInteractiveAppOffered('jupyter');
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -323,6 +355,12 @@ function JupyterSection() {
 
   const instances = data?.instances ?? [];
 
+  // Not offered here, and nothing of this caller's still running: the
+  // section has nothing left to say, so it goes rather than explaining
+  // itself. It stays while a session is listed, because a session the
+  // site has stopped offering is still the user's to open and to stop.
+  if (offered === false && !isLoading && instances.length === 0) return null;
+
   return (
     <SectionCard
       title="JupyterLab"
@@ -342,33 +380,40 @@ function JupyterSection() {
       )}
       {instances.length > 0 && <JupyterTable instances={instances} />}
 
-      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
-        <div className="text-sm font-medium text-gray-700">Launch new</div>
-        <Field label="Docker image">
-          <input
-            type="text"
-            value={image}
-            onChange={(e) => setImage(e.target.value)}
-            className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
-            placeholder={DEFAULT_JUPYTER_IMAGE}
-          />
-          <p className="mt-1 text-xs text-gray-500">
-            Ignored on macOS API hosts (vanilla universe + on-the-fly
-            conda env instead).
-          </p>
-        </Field>
-        <ResourceRequestPanel value={resources} onChange={setResources} />
-        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} label="Access point for JupyterLab" />
-        {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
-        <button
-          onClick={() => submit.mutate()}
-          disabled={submit.isPending || target.blocked}
-          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-        >
-          {submit.isPending ? 'Submitting…' : 'Launch JupyterLab'}
-        </button>
-      </div>
+      {offered === false ? (
+        <p className="rounded-sm border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+          This access point does not offer JupyterLab sessions. Any session
+          listed above is still yours to use and to stop.
+        </p>
+      ) : (
+        <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
+          <div className="text-sm font-medium text-gray-700">Launch new</div>
+          <Field label="Docker image">
+            <input
+              type="text"
+              value={image}
+              onChange={(e) => setImage(e.target.value)}
+              className="w-full rounded-sm border border-gray-300 px-3 py-1.5 font-mono text-sm"
+              placeholder={DEFAULT_JUPYTER_IMAGE}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Ignored on macOS API hosts (vanilla universe + on-the-fly
+              conda env instead).
+            </p>
+          </Field>
+          <ResourceRequestPanel value={resources} onChange={setResources} />
+          <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+          <LaunchTarget target={target} label="Access point for JupyterLab" />
+          {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
+          <button
+            onClick={() => submit.mutate()}
+            disabled={submit.isPending || target.blocked}
+            className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+          >
+            {submit.isPending ? 'Submitting…' : 'Launch JupyterLab'}
+          </button>
+        </div>
+      )}
     </SectionCard>
   );
 }
@@ -470,6 +515,7 @@ function jupyterRowStatus(inst: JupyterInstanceSummary): Status {
 // ----------------------------------------------------------------------
 
 function TerminalSection() {
+  const offered = useInteractiveAppOffered('terminal');
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -511,6 +557,12 @@ function TerminalSection() {
 
   const terminals = termsQuery.data?.terminals ?? [];
 
+  // Not offered here, and nothing of this caller's still running: the
+  // section has nothing left to say, so it goes rather than explaining
+  // itself. It stays while a session is listed, because a session the
+  // site has stopped offering is still the user's to open and to stop.
+  if (offered === false && !termsQuery.isLoading && terminals.length === 0) return null;
+
   return (
     <SectionCard
       title="Terminal"
@@ -536,20 +588,27 @@ function TerminalSection() {
         />
       )}
 
-      <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
-        <div className="text-sm font-medium text-gray-700">Launch new</div>
-        <ResourceRequestPanel value={resources} onChange={setResources} />
-        <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
-        <LaunchTarget target={target} label="Access point for the terminal" />
-        {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
-        <button
-          onClick={() => submit.mutate()}
-          disabled={submit.isPending || target.blocked}
-          className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
-        >
-          {submit.isPending ? 'Submitting…' : 'Launch terminal'}
-        </button>
-      </div>
+      {offered === false ? (
+        <p className="rounded-sm border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+          This access point does not offer Terminal sessions. Any session
+          listed above is still yours to use and to stop.
+        </p>
+      ) : (
+        <div className="rounded-sm border border-gray-200 bg-white p-4 space-y-4 mt-3">
+          <div className="text-sm font-medium text-gray-700">Launch new</div>
+          <ResourceRequestPanel value={resources} onChange={setResources} />
+          <SubmitLinesField value={submitLines} onChange={setSubmitLines} />
+          <LaunchTarget target={target} label="Access point for the terminal" />
+          {errorMsg && <ErrorBanner>{errorMsg}</ErrorBanner>}
+          <button
+            onClick={() => submit.mutate()}
+            disabled={submit.isPending || target.blocked}
+            className="rounded-sm bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-60"
+          >
+            {submit.isPending ? 'Submitting…' : 'Launch terminal'}
+          </button>
+        </div>
+      )}
     </SectionCard>
   );
 }

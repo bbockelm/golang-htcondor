@@ -82,6 +82,59 @@ func (h *Handler) SetMCPReadOnly(spec string) {
 	h.mcpServer.SetReadOnly(readOnly)
 }
 
+// reconfigOffered reads a setting for a feature that is ON unless the
+// operator turns it off, returning that default for an empty or
+// unparseable value and saying so in the log.
+//
+// Deliberately not reconfigBool(name, spec, true): there the default is
+// the caller's to choose, and it is chosen differently by different
+// settings. Here it is the same for all three, and a parameter that
+// every caller passes the same value to is one a reader has to check.
+func (h *Handler) reconfigOffered(name, spec string) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(spec)
+	if err != nil {
+		h.logger.Error(logging.DestinationHTTP,
+			"Reconfigure: ignoring a setting that is not a boolean; the feature stays offered",
+			"setting", name, "value", spec)
+		return true
+	}
+	return v
+}
+
+// SetInteractiveJupyter turns the JupyterLab application on or off.
+//
+// This and the two below are dynamic because nothing is constructed
+// from them: each is a check made when a session is created, and the
+// list /auth/me publishes is read per request, so a reconfigure reaches
+// the next launch and the next page load. The alternative -- restarting
+// the daemon -- drops every live notebook and terminal to stop new ones
+// being made, which is the opposite of what these settings are careful
+// about.
+func (h *Handler) SetInteractiveJupyter(spec string) {
+	h.interactive.set(appJupyter, h.reconfigOffered("HTTP_API_INTERACTIVE_JUPYTER", spec))
+}
+
+// SetInteractiveVSCode turns the VS Code application on or off.
+func (h *Handler) SetInteractiveVSCode(spec string) {
+	h.interactive.set(appVSCode, h.reconfigOffered("HTTP_API_INTERACTIVE_VSCODE", spec))
+}
+
+// SetInteractiveTerminal turns the Terminal application on or off,
+// and with it the MCP tool that starts the same kind of session.
+func (h *Handler) SetInteractiveTerminal(spec string) {
+	on := h.reconfigOffered("HTTP_API_INTERACTIVE_TERMINAL", spec)
+	h.interactive.set(appTerminal, on)
+	// The MCP interactive-session tools are the other front door onto
+	// the same thing, so they follow it. See interactive_apps.go.
+	if h.mcpServer != nil {
+		h.mcpServer.SetInteractiveSessionsOffered(on)
+	}
+}
+
 // SetMCPRedactSecrets turns credential masking on tool results on or off.
 //
 // The two masking settings are applied together because the rule set is

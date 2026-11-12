@@ -242,6 +242,11 @@ func (s *Handler) sshCommandForSession(kind, name string) string {
 func (s *Handler) handleInteractiveTerminal(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
+		// Creation only, as with the other two: listing keeps working so
+		// a terminal already running can still be found and stopped.
+		if !s.requireInteractiveApp(w, appTerminal) {
+			return
+		}
 		s.handleInteractiveCreateTerminal(w, r)
 	case http.MethodGet:
 		s.handleInteractiveListTerminals(w, r)

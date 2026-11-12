@@ -99,6 +99,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         superuserActive={session?.superuser_active}
         multiAP={session?.multi_ap}
         reservations={session?.reservations}
+        interactive={session?.interactive}
         siteApps={session?.site_apps}
         appOnly={session?.app_only}
         expertActive={session?.expert_active}

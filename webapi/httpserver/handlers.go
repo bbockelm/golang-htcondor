@@ -763,11 +763,21 @@ func (s *Handler) serveJobByID(w http.ResponseWriter, r *http.Request) {
 			s.handleJobRelease(w, r, jobID)
 			return
 		case "ssh":
+			// The console's terminal on a running job. Refused where
+			// the site allows nothing into a sandbox; reading the
+			// job's output and files is unaffected.
+			if !s.requireSSHToJob(w) {
+				return
+			}
 			s.handleJobSSH(w, r)
 			return
 		case "warm":
 			// POST /api/v1/jobs/{id}/warm — open the transport now, so
-			// that whatever connects next does not have to.
+			// that whatever connects next does not have to. The
+			// transport it opens is the ssh-to-job one.
+			if !s.requireSSHToJob(w) {
+				return
+			}
 			s.handleJobWarm(w, r, jobID)
 			return
 		}
@@ -777,6 +787,12 @@ func (s *Handler) serveJobByID(w http.ResponseWriter, r *http.Request) {
 	//   /api/v1/jobs/{id}/proxy/{port}/{rest...}
 	//   /api/v1/jobs/{id}/proxy/unix/{socket}/{rest...}
 	if len(parts) >= 2 && parts[1] == "proxy" {
+		// The proxy rides the ssh-to-job transport, so it goes with it
+		// -- and the VS Code app, which is reached through this path,
+		// goes with the proxy.
+		if !s.requireSSHToJob(w) {
+			return
+		}
 		cluster, proc, err := parseJobID(jobID)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid job ID: %v", err))
