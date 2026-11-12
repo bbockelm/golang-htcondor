@@ -3,6 +3,8 @@
 package fuzzsubmit
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -672,18 +674,74 @@ func requireOracle(t testing.TB) {
 // endlessly; what this target is for is the semantics of files both sides
 // accept. Acceptance divergence is tracked separately by
 // TestSeedParseAcceptance, which reports rather than fails.
+// execNamesDirectory reports whether the job's Cmd names a directory that
+// exists, which is the shape that makes the oracle walk a filesystem tree.
+//
+// Both spellings of the path are tried, as given and resolved against the
+// working directory, because condor_submit resolves a relative executable
+// against the job's IWD and a guard that missed the relative form would let
+// the walk through.
+func execNamesDirectory(ads Ads) bool {
+	for _, k := range ads.Keys() {
+		cmd, ok := lookupFold(ads.ByKey[k], "Cmd")
+		if !ok {
+			continue
+		}
+		cmd = strings.Trim(cmd, `"`)
+		if cmd == "" {
+			continue
+		}
+		candidates := []string{cmd}
+		if !filepath.IsAbs(cmd) {
+			if wd, err := os.Getwd(); err == nil {
+				candidates = append(candidates, filepath.Join(wd, cmd))
+			}
+		}
+		for _, c := range candidates {
+			if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func check(t testing.TB, src string) (fresh []Divergence, seenKnown map[string]bool, skip bool) {
 	t.Helper()
+
+	// The Go parser runs first so it can be asked what the executable is
+	// before the oracle is handed the file at all.
+	//
+	// condor_submit sizes the executable, and when the executable names a
+	// DIRECTORY it sizes it by walking the tree:
+	// SubmitHash::calc_image_size_kb calls Directory::GetDirectorySize for
+	// anything with S_IFDIR. `executable = /` therefore walks the whole
+	// filesystem inside a cgo call that cannot be interrupted, and the fuzz
+	// worker never comes back -- the run dies as "fuzzing process hung or
+	// terminated unexpectedly" naming whatever input that worker happened to
+	// hold. A one-character path is well within reach of the mutator, so this
+	// is a recurring way for the nightly to fail on nothing.
+	//
+	// The Go parser computes no size at all (ExecutableSize comes only from
+	// the executable_size command), so it answers instantly, and the
+	// comparison loses nothing by skipping: the size attributes are host
+	// entries already, excused on every input.
+	goRes := GoMakeAds(src)
+	if goRes.Panic {
+		t.Fatalf("Go submit parser panicked on:\n%q", src)
+	}
+	if !goRes.OK {
+		return nil, nil, true
+	}
+	if execNamesDirectory(goRes.Ads) {
+		return nil, nil, true
+	}
 
 	cpp := oracle.MakeAds(src, oracle.ModeAds, MaxProcs)
 	if cpp.Panic {
 		return nil, nil, true // a C++ exception is uncomparable, not a Go bug
 	}
-	goRes := GoMakeAds(src)
-	if goRes.Panic {
-		t.Fatalf("Go submit parser panicked on:\n%q", src)
-	}
-	if !cpp.OK || !goRes.OK {
+	if !cpp.OK {
 		return nil, nil, true
 	}
 

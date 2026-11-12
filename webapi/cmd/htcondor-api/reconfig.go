@@ -62,6 +62,7 @@ type reconfigTarget interface {
 	// exist is not known until they are read.
 	SetSiteAppPolicy(*config.Config)
 	SetMCPDisabledTools(string)
+	SetMCPReadOnly(string)
 	SetInteractiveJupyter(string)
 	SetInteractiveVSCode(string)
 	SetInteractiveTerminal(string)
@@ -100,6 +101,18 @@ var reconfigParams = []reconfigParam{
 		name: "HTTP_API_MCP_DISABLED_TOOLS",
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPDisabledTools(v)
+		},
+	},
+
+	// Whether this access point serves MCP read-only. Dynamic for the
+	// same reason, and for one more: it is the setting an operator
+	// reaches for when an agent has just done something they did not
+	// expect, which is the worst possible moment to be told to restart
+	// the daemon.
+	{
+		name: "HTTP_API_MCP_READ_ONLY",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPReadOnly(v)
 		},
 	},
 

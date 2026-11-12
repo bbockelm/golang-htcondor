@@ -74,6 +74,11 @@ type Server struct {
 	// atomically because a reconfigure can install a new one while a
 	// tools/list or a tool call is being served.
 	disabledTools atomic.Pointer[disabledToolMatcher]
+	// readOnly is the operator's HTTP_API_MCP_READ_ONLY decision: when
+	// set, no tool that changes anything is offered or accepted, whatever
+	// the caller's scopes say. Atomic for the same reason as the matcher
+	// above. See read_only.go.
+	readOnly atomic.Bool
 	// interactiveSessionsOff is set where this access point does not
 	// offer interactive sessions at all -- the access point's setting
 	// rather than an MCP one, since the web console's Terminal is the
@@ -354,6 +359,12 @@ type Config struct {
 	// offer, as path.Match patterns separated by commas or whitespace.
 	// See disabled_tools.go.
 	DisabledTools string
+	// ReadOnly (HTTP_API_MCP_READ_ONLY) withholds every tool that changes
+	// anything, for an installation that wants its users to have agents
+	// without those agents being able to act. Unlike the mcp:read scope
+	// this binds every caller, including the unscoped ones. See
+	// read_only.go.
+	ReadOnly bool
 	// SSHToJobNotOffered withholds every tool that reaches into a
 	// running job -- exec_in_job and the two session tools that enter
 	// the sandbox -- because this access point allows nothing to
@@ -661,6 +672,7 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
+	s.SetReadOnly(cfg.ReadOnly)
 	s.SetInteractiveSessionsOffered(!cfg.InteractiveSessionsNotOffered)
 	s.SetSSHToJobOffered(!cfg.SSHToJobNotOffered)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)

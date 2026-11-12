@@ -160,7 +160,14 @@ func (s *Handler) getScopesForGroups(userGroups []string, requestedScopes []stri
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:write":
-			if s.writeScopeAllowed(userGroups) {
+			// Not granted at all where the installation serves MCP
+			// read-only. The refusal that matters is in the tool server,
+			// which every transport passes through; this is so the grant
+			// describes what it can do. A token carrying a scope that
+			// buys nothing is how a user comes to believe they were
+			// given something, and how an agent comes to keep retrying a
+			// call that will never work.
+			if !s.mcpReadOnly.Load() && s.writeScopeAllowed(userGroups) {
 				grantedScopes = append(grantedScopes, scope)
 			}
 		case "mcp:admin":

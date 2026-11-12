@@ -424,6 +424,16 @@ type Handler struct {
 	revocationOracles []RevocationOracle
 	mcpInstructions   string // Server-level instructions provided to agents via MCP initialize
 	mcpDisabledTools  string // HTTP_API_MCP_DISABLED_TOOLS: tools this site cannot offer
+	// HTTP_API_MCP_READ_ONLY: this installation offers MCP, and offers
+	// nothing through it that changes anything. Kept here because the
+	// OAuth2 side reads it too -- a server that will refuse every write
+	// should not be granting mcp:write or advertising it.
+	//
+	// Atomic because those readers are request goroutines and the
+	// writer is the reconfigure one. The settings beside this are
+	// written on a reconfigure and read only while applying it, which
+	// is why they are plain fields and this is not.
+	mcpReadOnly atomic.Bool
 	// HTTP_API_MCP_REDACT_SECRETS / _DISABLED_RULES: credential masking
 	// on tool results. Both are kept because the two settings are
 	// applied together and a reconfigure delivers one at a time.
@@ -440,7 +450,19 @@ type Handler struct {
 	// siteApps serves operator-deployed static web apps under /site/.
 	// nil when HTTP_API_SITE_APPS_DIR is unset, which leaves the whole
 	// feature -- routes included -- out of the server.
-	siteApps      *siteapps.Library
+	siteApps *siteapps.Library
+	// siteAppConfig is the configuration-backed policy alone. Kept
+	// apart from the library's chained source so the upload path can
+	// ask whether the configuration has already decided an id.
+	siteAppConfig *siteapps.ConfigPolicy
+	// siteAppUploads is the store behind administrator-published
+	// apps; nil without a database.
+	siteAppUploads *siteapps.UploadStore
+	// siteAppUpload is HTTP_API_SITE_APPS_UPLOAD: whether this server
+	// accepts bundles through the web interface at all. Off by
+	// default -- an uploaded app runs with the rights of everyone who
+	// opens it, so it is not implied by administering the server.
+	siteAppUpload bool
 	mcpAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// poolQueryPolicy restricts which collector attributes an
 	// unprivileged caller reads. Never nil after NewHandler; an
@@ -1169,6 +1191,9 @@ type HandlerConfig struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
+	// changes anything, for every caller regardless of scope.
+	MCPReadOnly bool
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false). Negative so that the
 	// zero value is the protective one; see mcpserver.Config.
@@ -1194,6 +1219,10 @@ type HandlerConfig struct {
 	// the directory. Empty disables site apps entirely: no library is
 	// built and no /site/ route is registered.
 	SiteAppsDir string
+	// SiteAppsUpload is HTTP_API_SITE_APPS_UPLOAD: whether
+	// administrators may publish a bundle through the web interface.
+	// False unless the site says otherwise; see siteapps_admin.go.
+	SiteAppsUpload bool
 	// SiteAppsReloadInterval is how often that directory is rescanned,
 	// so dropping a new bundle in place needs no restart and no signal.
 	// Zero selects defaultSiteAppsReload.
@@ -2145,6 +2174,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	// runs before there is a context for the rescan goroutine.
 	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
 	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
+	h.siteAppUpload = cfg.SiteAppsUpload
 	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir, cfg.HTCondorConfig)
 	h.branding = newBrandingState(logger, brandingOptions{
 		SiteName:    cfg.WebUISiteName,
@@ -2305,6 +2335,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpUseSDK = cfg.MCPUseSDKTransport
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpDisabledTools = cfg.MCPDisabledTools
+		h.mcpReadOnly.Store(cfg.MCPReadOnly)
 		h.mcpDisableSecretRedaction = cfg.MCPDisableSecretRedaction
 		h.mcpRedactDisabledRules = cfg.MCPRedactDisabledRules
 		h.mcpSkillsDir = cfg.MCPSkillsDir
@@ -2570,6 +2601,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		AdminUsers:     h.mcpAdminUsers,
 		Instructions:   h.mcpInstructions,
 		DisabledTools:  h.mcpDisabledTools,
+		ReadOnly:       h.mcpReadOnly.Load(),
 		// The access point's own settings, not MCP ones: the MCP session
 		// tools and the console's Terminal are one capability, and what
 		// may reach into a running job is the site's decision however
