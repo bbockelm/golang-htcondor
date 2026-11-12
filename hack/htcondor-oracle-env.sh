@@ -82,12 +82,22 @@ fi
 UTIL_L=$(basename "$UTIL" | sed -E 's/^lib([^.]+)\.(dylib|so).*/\1/')
 
 # Directories the util library and its transitive deps live in: the util and
-# classad dirs, the installed condor/ subdir, and (macOS) libressl, which
-# libSciTokens pulls in for libssl/libcrypto.
+# classad dirs, the installed condor/ subdir, libSciTokens (the one @rpath
+# dependency libcondor_utils records), and (macOS) libressl, which libSciTokens
+# pulls in for libssl/libcrypto.
+#
+# SciTokens needs its own entry only in a tree built with `ninja condor_utils`
+# and never installed, where it is still under _deps; `ninja install` copies it
+# next to the util library, which the first entry already covers. Building just
+# the one target is much cheaper than a full install, so that tree is worth
+# supporting -- without this the oracle links but aborts at load with
+# "Library not loaded: @rpath/libSciTokens.0.dylib".
+SCITOKENS="$HTCONDOR_BUILD/_deps/scitokens-build"
 RESSL="$HTCONDOR_BUILD/_deps/libressl_libs_darwin-src/lib"
 LIBPATH="$UTILDIR"
 [ "$CLASSADDIR" != "$UTILDIR" ] && LIBPATH="$LIBPATH:$CLASSADDIR"
 [ -d "$UTILDIR/condor" ] && LIBPATH="$LIBPATH:$UTILDIR/condor"
+[ -d "$SCITOKENS" ] && LIBPATH="$LIBPATH:$SCITOKENS"
 [ -d "$RESSL" ] && LIBPATH="$LIBPATH:$RESSL"
 
 # Embed rpaths for every one of those dirs so the test binary finds them
