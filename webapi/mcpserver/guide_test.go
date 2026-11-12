@@ -36,9 +36,14 @@ func TestDocGuideServesTopicAndIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("topic dag: %v", err)
 	}
+	// Contains, not equals: the guide is filtered against the catalogue,
+	// and this server offers no watches (it has no schedd), so the topic
+	// is served with a note naming them. That the note is right is
+	// guide_offered_test.go's business; this test is about the topic
+	// coming back at all.
 	want, _ := guideText("dag")
-	if sc := got.(map[string]interface{})["structuredContent"].(map[string]interface{}); sc["content"] != want {
-		t.Errorf("topic dag returned %q, want the dag topic", sc["content"])
+	if sc := got.(map[string]interface{})["structuredContent"].(map[string]interface{}); !strings.Contains(sc["content"].(string), want) {
+		t.Errorf("topic dag returned %q, want it to contain the dag topic", sc["content"])
 	}
 
 	got, err = s.toolDocGuide(context.Background(), map[string]interface{}{})

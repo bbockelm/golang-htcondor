@@ -739,7 +739,10 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 
 	// The agent guide is compiled into every build, unlike the manual
 	// pages below, so it is always offered.
-	tools = append(tools, docGuideTool())
+	// Declared over every topic for now; the post-pass below narrows it
+	// to the topics this caller is served, once the catalogue it is
+	// filtered against exists.
+	tools = append(tools, docGuideTool(guideTopics))
 
 	// Add HTCondor documentation tools if the docs are embedded.
 	// These are read-only, side-effect-free reference lookups; we
@@ -952,6 +955,24 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 			filtered = append(filtered, t)
 		}
 	}
+	// Re-declare doc_guide over the topics that still have a tool behind
+	// them. Done here rather than where it is appended because it is
+	// filtered against this very catalogue: a guide that describes tools
+	// the caller cannot call talks an agent into calls that are refused.
+	// See guide_offered.go.
+	offered := make(map[string]bool, len(filtered))
+	for _, t := range filtered {
+		offered[t.Name] = true
+	}
+	if topics := guideTopicsFor(offered); len(topics) != len(guideTopics) {
+		for i := range filtered {
+			if filtered[i].Name == "doc_guide" {
+				filtered[i] = docGuideTool(topics)
+				break
+			}
+		}
+	}
+
 	// Stamp the behavioural hints and output schema from the central
 	// policies. Done here, at the one chokepoint both transports read, so a
 	// tool declared anywhere is annotated and schematised once and the

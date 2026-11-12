@@ -25,19 +25,36 @@ var guideFS embed.FS
 type guideTopic struct {
 	name    string
 	summary string
+	// needs names the tools the topic is ABOUT, so that a topic whose
+	// subject this access point does not offer can be withdrawn rather
+	// than left teaching calls that will be refused (guide_offered.go).
+	//
+	// Declared rather than read out of the text, which the note beside
+	// it is: "which tools does this paragraph name" and "what is this
+	// topic for" are different questions, and the first answers the
+	// second badly. The interactive topic mentions whoami in an aside
+	// about multi-AP; reading that as a subject keeps the topic alive
+	// on a site with no sessions at all, which is the one case it has
+	// to be withdrawn in. guide_offered_test.go checks that every name
+	// here is a real tool and does appear in the topic's text.
+	//
+	// Empty means a topic that is never withdrawn -- "tools" is the
+	// catalogue overview, and what it should say about a withheld tool
+	// is said by the note.
+	needs []string
 }
 
 // guideTopics is the guide's index, in the order it is listed. Every entry
 // has a guide/<name>.md, and every file has an entry (see guide_test.go).
 var guideTopics = []guideTopic{
-	{"workflow", "the submit, upload, wait, collect sequence; moving large inputs and outputs by URL"},
-	{"submit_files", "a minimal submit file, transfer_executable, $(...) macros, environment"},
-	{"monitoring", "job states, waiting without polling, live vs finished output, attributes, constraints, history"},
-	{"troubleshooting", "jobs stuck idle, held jobs and their causes, credentials, restarts"},
-	{"dag", "multi-step workflows with DAGMan"},
-	{"interactive", "interactive sessions, and one command in a running job"},
-	{"containers", "building Apptainer images with build_container"},
-	{"tools", "every tool, grouped by task"},
+	{"workflow", "the submit, upload, wait, collect sequence; moving large inputs and outputs by URL", []string{"submit_job"}},
+	{"submit_files", "a minimal submit file, transfer_executable, $(...) macros, environment", []string{"submit_job"}},
+	{"monitoring", "job states, waiting without polling, live vs finished output, attributes, constraints, history", []string{"query_jobs"}},
+	{"troubleshooting", "jobs stuck idle, held jobs and their causes, credentials, restarts", []string{"analyze_issues", "get_job"}},
+	{"dag", "multi-step workflows with DAGMan", []string{"submit_dag"}},
+	{"interactive", "interactive sessions, and one command in a running job", []string{"interactive_session_start", "exec_in_job"}},
+	{"containers", "building Apptainer images with build_container", []string{"build_container"}},
+	{"tools", "every tool, grouped by task", nil},
 }
 
 func guideTopicNames() []string {
@@ -78,27 +95,40 @@ func guideText(topic string) (string, bool) {
 	return "", false
 }
 
-func guideIndex() string {
+// guideIndex lists the topics given, which are the ones this caller is
+// served -- see guide_offered.go.
+func guideIndex(topics []guideTopic) string {
 	var b strings.Builder
 	b.WriteString("Topics in the agent guide (call doc_guide with one):\n")
-	for _, t := range guideTopics {
+	for _, t := range topics {
 		fmt.Fprintf(&b, "- %s -- %s\n", t.name, t.summary)
 	}
 	return b.String()
 }
 
-func docGuideTool() Tool {
+func topicNames(topics []guideTopic) []string {
+	names := make([]string, len(topics))
+	for i, t := range topics {
+		names[i] = t.name
+	}
+	return names
+}
+
+// docGuideTool declares the tool over the topics this caller is served,
+// so the enum a client validates against and the index in the
+// description name the same topics doc_guide will answer.
+func docGuideTool(topics []guideTopic) Tool {
 	return Tool{
 		Name: "doc_guide",
 		Description: "Read a topic of the guide to this server's tools: how to submit, wait for and " +
 			"diagnose jobs, and the mistakes to avoid. Call with no topic for the list. " +
-			strings.TrimSuffix(strings.ReplaceAll(guideIndex(), "\n- ", " | "), "\n"),
+			strings.TrimSuffix(strings.ReplaceAll(guideIndex(topics), "\n- ", " | "), "\n"),
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"topic": map[string]interface{}{
 					"type":        "string",
-					"enum":        guideTopicNames(),
+					"enum":        topicNames(topics),
 					"description": "The topic to read. Omit it to list the topics.",
 				},
 			},
@@ -107,24 +137,29 @@ func docGuideTool() Tool {
 }
 
 // toolDocGuide answers doc_guide: one topic in full, or the index.
-func (s *Server) toolDocGuide(_ context.Context, args map[string]interface{}) (interface{}, error) {
+func (s *Server) toolDocGuide(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	topic, _ := args["topic"].(string)
 	topic = strings.TrimSpace(topic)
 
-	topics := make([]map[string]interface{}, 0, len(guideTopics))
-	for _, t := range guideTopics {
+	// What this caller is served, which is what the guide is filtered
+	// against. See guide_offered.go.
+	offered := s.offeredToolNames(ctx)
+	shown := guideTopicsFor(offered)
+
+	topics := make([]map[string]interface{}, 0, len(shown))
+	for _, t := range shown {
 		topics = append(topics, map[string]interface{}{"name": t.name, "summary": t.summary})
 	}
 
 	if topic == "" {
-		index := guideIndex()
+		index := guideIndex(shown)
 		return structuredTextResult(index, map[string]interface{}{
 			"topic": "", "content": index, "topics": topics,
 		}), nil
 	}
-	text, ok := guideText(topic)
+	text, ok := guideTextFor(topic, offered)
 	if !ok {
-		return nil, fmt.Errorf("no guide topic %q; topics are: %s", topic, strings.Join(guideTopicNames(), ", "))
+		return nil, fmt.Errorf("no guide topic %q; topics are: %s", topic, strings.Join(topicNames(shown), ", "))
 	}
 	return structuredTextResult(text, map[string]interface{}{"topic": topic, "content": text}), nil
 }
