@@ -48,10 +48,15 @@ func TestSieve(t *testing.T) {
 	untouched := classad.New()
 
 	cases := []struct {
-		name    string
-		machine *classad.ClassAd
-		job     *classad.ClassAd
-		want    bool
+		name string
+		// machine is the execute point's ad, built once above. A case
+		// whose answer depends on how much of the window is LEFT uses
+		// machineAt instead, which is built against the clock the
+		// sieve will actually read.
+		machine   *classad.ClassAd
+		machineAt func(now time.Time) *classad.ClassAd
+		job       *classad.ClassAd
+		want      bool
 	}{
 		{
 			// Nothing has ever been pushed here. ReservationUntil
@@ -80,10 +85,19 @@ func TestSieve(t *testing.T) {
 		{
 			// A job exactly as long as the time left is admitted: it
 			// finishes at the bell, which is when the seat is wanted.
-			name:    "draining admits a job that ends exactly at the bell",
-			machine: draining,
-			job:     jobAd(map[string]any{AttrBucket: int64(4 * 3600)}),
-			want:    true,
+			name: "draining admits a job that ends exactly at the bell",
+			// Built here, not above with the others. The sieve compares
+			// time() against the deadline, so "exactly" holds only if no
+			// time passes between constructing the ad and evaluating it
+			// -- and on a loaded runner it does. Measured against this
+			// test: a 2s stall before the subtests turns this case from
+			// admitted to refused, which is what failed in CI and says
+			// nothing about the policy being tested.
+			machineAt: func(now time.Time) *classad.ClassAd {
+				return HoldAd(now.Add(4*time.Hour), now.Add(5*time.Hour+30*time.Minute), "cs301")
+			},
+			job:  jobAd(map[string]any{AttrBucket: int64(4 * 3600)}),
+			want: true,
 		},
 		{
 			name:    "draining admits the reservation's own jobs",
@@ -149,8 +163,12 @@ func TestSieve(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := admits(t, tc.machine, tc.job); got != tc.want {
-				t.Errorf("admitted = %v, want %v (sieve said %v)", got, tc.want, sieveSays(t, tc.machine, tc.job))
+			machine := tc.machine
+			if tc.machineAt != nil {
+				machine = tc.machineAt(time.Now())
+			}
+			if got := admits(t, machine, tc.job); got != tc.want {
+				t.Errorf("admitted = %v, want %v (sieve said %v)", got, tc.want, sieveSays(t, machine, tc.job))
 			}
 		})
 	}
