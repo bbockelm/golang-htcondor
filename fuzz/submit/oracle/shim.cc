@@ -120,6 +120,36 @@ void ensure_config() {
 	config();
 }
 
+// The queue iterator grew a task-id out-parameter upstream, under
+// SUPPORT_FOR_TASK_PACKING in submit_utils.h, so the same call takes four
+// arguments against one HTCondor and five against another. The oracle is built
+// against both a pinned release and HTCondor's moving main branch, so it has to
+// compile either way; condor_submit itself carries the same #ifdef at each of
+// its own call sites.
+//
+// The task id is the iterator's alone. condor_submit does not pass it to
+// make_job_ad -- that signature is unchanged -- so a scratch local is the whole
+// of what either side needs here.
+int next_selected_compat(SubmitStepFromQArgs &ssqa, JOB_ID_KEY &jid, int &item_index,
+                         int &step, bool set_live) {
+#ifdef SUPPORT_FOR_TASK_PACKING
+	int taskid = 0;
+	return ssqa.next_selected(jid, item_index, step, taskid, set_live);
+#else
+	return ssqa.next_selected(jid, item_index, step, set_live);
+#endif
+}
+
+int next_raw_compat(SubmitStepFromQArgs &ssqa, JOB_ID_KEY &jid, int &item_index,
+                    int &step, bool set_live) {
+#ifdef SUPPORT_FOR_TASK_PACKING
+	int taskid = 0;
+	return ssqa.next_raw(jid, item_index, step, taskid, set_live);
+#else
+	return ssqa.next_raw(jid, item_index, step, set_live);
+#endif
+}
+
 int prepare(const char *text, SubmitHash &hash, std::string &buf, MACRO_SOURCE &src,
             std::unique_ptr<MacroStreamMemoryFile> &ms, SubmitStepFromQArgs &ssqa,
             std::string &err) {
@@ -186,7 +216,7 @@ extern "C" int submit_make_ads(const char *text, int mode, int max_procs, char *
 		int item_index = 0, step = 0, n = 0;
 		bool truncated = false;
 
-		while ((rval = ssqa.next_selected(jid, item_index, step, true)) > 0) {
+		while ((rval = next_selected_compat(ssqa, jid, item_index, step, true)) > 0) {
 			if (n >= max_procs) {
 				truncated = true;
 				break;
@@ -264,7 +294,7 @@ extern "C" int submit_factory_info(const char *text, int max_items, const char *
 		ssqa.begin(JOB_ID_KEY(cluster, 0), false);
 		JOB_ID_KEY jid;
 		int item_index = 0, step = 0;
-		if (ssqa.next_raw(jid, item_index, step, false) < 0) {
+		if (next_raw_compat(ssqa, jid, item_index, step, false) < 0) {
 			*out = strdup("queue iteration failed");
 			return 0;
 		}
