@@ -25,8 +25,9 @@ func noSSHHandler(t *testing.T) *Handler {
 	return h
 }
 
-func asAlice(method, path string) *http.Request {
-	r := httptest.NewRequest(method, path, nil)
+func asAlice(t *testing.T, method, path string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequestWithContext(t.Context(), method, path, nil)
 	r.Header.Set("X-Remote-User", "alice")
 	return r
 }
@@ -47,7 +48,7 @@ func TestReachingIntoAJobIsRefusedWhereTheSiteForbidsIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := noSSHHandler(t)
 			w := httptest.NewRecorder()
-			h.handleJobByID(w, asAlice(tc.method, tc.path))
+			h.handleJobByID(w, asAlice(t, tc.method, tc.path))
 
 			if w.Code != http.StatusServiceUnavailable {
 				t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
@@ -76,7 +77,7 @@ func TestTheGatewaysOwnEndpointsRefuseToo(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := noSSHHandler(t)
 			w := httptest.NewRecorder()
-			tc.fn(h, w, httptest.NewRequest(tc.method, tc.path, nil))
+			tc.fn(h, w, httptest.NewRequestWithContext(t.Context(), tc.method, tc.path, nil))
 			if w.Code != http.StatusServiceUnavailable {
 				t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 			}
