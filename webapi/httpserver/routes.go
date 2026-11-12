@@ -282,6 +282,12 @@ func (h *Handler) setupRoutes() {
 	mux.Handle("/api/v1/admin/logs", cors(http.HandlerFunc(h.handleAdminLogs)))
 	mux.Handle("/api/v1/admin/usage", cors(http.HandlerFunc(h.handleAdminUsage)))
 	mux.Handle("/api/v1/admin/condor-config", cors(http.HandlerFunc(h.handleAdminCondorConfig)))
+	// Site apps: what is published, what has been, and -- where the
+	// site allows it -- publishing one. Registered whatever
+	// HTTP_API_SITE_APPS_DIR says, so the page can explain that the
+	// feature is off rather than 404.
+	mux.Handle("/api/v1/admin/site-apps", cors(http.HandlerFunc(h.handleAdminSiteApps)))
+	mux.Handle("/api/v1/admin/site-apps/", cors(http.HandlerFunc(h.handleAdminSiteApps)))
 	// API key management (admin-only). The collection path covers
 	// list (GET) and create (POST); the per-key path is for soft-
 	// delete (DELETE /api/v1/admin/api-keys/{key_id}).

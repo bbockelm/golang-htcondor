@@ -374,6 +374,9 @@ type Config struct {
 	// MCPDisabledTools (HTTP_API_MCP_DISABLED_TOOLS) names tools this site cannot
 	// offer, as path.Match patterns separated by commas or whitespace.
 	MCPDisabledTools string
+	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
+	// changes anything, whatever the caller's scopes say.
+	MCPReadOnly bool
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false).
 	MCPDisableSecretRedaction bool
@@ -383,11 +386,14 @@ type Config struct {
 	// WebUIAppOnlyGroup names groups whose members land in their site app
 	// instead of the dashboard. Presentation only; see HandlerConfig.
 	WebUIAppOnlyGroup string
-	// SiteAppsDir holds the <id>.zip bundles and <id>.yaml policy files
+	// SiteAppsDir holds the <id>.zip bundles; policy is configuration
 	// for operator-deployed static web apps. Empty disables the feature.
 	SiteAppsDir string
 	// SiteAppsReloadInterval is how often that directory is rescanned.
 	SiteAppsReloadInterval time.Duration
+	// SiteAppsUpload is whether administrators may publish a bundle
+	// through the web interface (HTTP_API_SITE_APPS_UPLOAD).
+	SiteAppsUpload bool
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
@@ -634,12 +640,14 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPSuperuserGroup:           cfg.MCPSuperuserGroup,
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
+		MCPReadOnly:                 cfg.MCPReadOnly,
 		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
 		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,
 		WebUIAppOnlyGroup:           cfg.WebUIAppOnlyGroup,
 		SiteAppsDir:                 cfg.SiteAppsDir,
 		SiteAppsReloadInterval:      cfg.SiteAppsReloadInterval,
+		SiteAppsUpload:              cfg.SiteAppsUpload,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,

@@ -115,6 +115,37 @@ can also rebuild from their tagged commit and compare, which answers
 "is what is deployed what they shipped?" rather than only "did it
 arrive intact?".
 
+## Publishing from the web interface
+
+Off by default. An administrator who can upload a bundle and name its
+groups can run code in those users' browsers, with their session: a
+site app is served same-origin and can do anything its visitor can. So
+it is a grant of its own rather than something administering this
+server implies.
+
+```
+HTTP_API_SITE_APPS_UPLOAD = true
+```
+
+With it set, **Site Apps** under the admin pages gains a form. The
+bundle is written into `HTTP_API_SITE_APPS_DIR` as `<id>.zip` -- the
+same place an scp would put it -- and who may see it is recorded in the
+application database rather than in the configuration.
+
+**The configuration still wins.** An id named by
+`HTTP_API_SITE_APP_<ID>_GROUPS` cannot be uploaded over, withdrawn, or
+re-scoped from the web: the upload is refused, naming the parameter to
+edit. An app published by the configuration is read-only on that page
+whatever this setting says. Without that rule, uploading would be a way
+around the decision the configuration had already made.
+
+Each listed app says which decision published it, so "why is this
+visible?" is answerable from the page.
+
+Leaving this off is a reasonable choice for an access point whose
+configuration is managed centrally: the page still shows what is
+published and what has been, and says where to put a bundle.
+
 ## What has been served
 
 The configuration says what you intend. It cannot tell you what was
@@ -213,6 +244,7 @@ staff that is usually an easy call. It should still be a knowing one.
 | `HTTP_API_SITE_APPS_DIR` | Directory holding `<id>.zip` bundles. Unset disables site apps entirely — no `/site/` routes are registered. Changing it needs a restart. |
 | `HTTP_API_SITE_APPS_RELOAD_INTERVAL` | How often that directory is rescanned, as a Go duration (`30s`, `5m`). Default one minute. Changing it needs a restart. |
 | `HTTP_API_SITE_APP_<ID>_*` | One app's policy; see [The parameters](#the-parameters). Re-read on every `condor_reconfig`, which also rescans the directory. |
+| `HTTP_API_SITE_APPS_UPLOAD` | Whether administrators may publish a bundle from the web interface. Off by default; see [Publishing from the web interface](#publishing-from-the-web-interface). |
 | `HTTP_API_WEBUI_APP_ONLY_GROUP` | Comma-separated groups whose members land in their app rather than the dashboard. Reloaded on SIGHUP. |
 
 An unpacked directory works in place of a zip, with the same layout, for
