@@ -732,6 +732,19 @@ func (l *Logger) currentLevels() *levelSet {
 
 // shouldLog checks if a log should be written based on destination-specific verbosity level
 func (l *Logger) shouldLog(dest Destination, msgLevel Verbosity) bool {
+	// A nil Logger drops the line instead of killing the process.
+	//
+	// Startup reads configuration before it can build a logger -- the
+	// logger's own settings are in that configuration -- so the helpers
+	// that do the reading are handed a nil one and are expected not to
+	// use it. Every log method in this file goes through here, so one
+	// check covers all of them. Without it a log line on a path that
+	// happens to run early is a SIGSEGV at startup, which is how
+	// htcondor-api came to crash-loop the first time a site-apps
+	// directory was configured.
+	if l == nil {
+		return false
+	}
 	// Only log if message level is at or below the destination's configured level
 	// (from the live snapshot).
 	return msgLevel <= l.currentLevels().levelFor(dest)

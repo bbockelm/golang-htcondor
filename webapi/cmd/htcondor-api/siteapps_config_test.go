@@ -96,3 +96,37 @@ func TestSiteAppUploadIsOffByDefault(t *testing.T) {
 		t.Error("HTTP_API_SITE_APPS_UPLOAD = true did not enable upload")
 	}
 }
+
+// Startup reads configuration before it can build a logger, so the
+// helpers that do the reading get a nil one. This one logs what it
+// found, and a nil *Logger used to be a SIGSEGV: setting a site-apps
+// directory on a real server crash-looped it at startup, and the
+// existing coverage missed it only because every case above hands in a
+// real logger.
+//
+// It is not enough to call it with no directory configured -- the log
+// line is inside the branch that a configured directory takes.
+func TestSiteAppsConfigSurvivesANilLogger(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("_CONDOR_HTTP_API_SITE_APPS_DIR", dir)
+	t.Setenv("_CONDOR_HTTP_API_SITE_APPS_RELOAD_INTERVAL", "not a duration")
+	t.Setenv("_CONDOR_HTTP_API_SITE_APPS_UPLOAD", "true")
+
+	cfg, err := config.New()
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	// Every logging branch at once: the directory line, the bad-duration
+	// error, and the upload-enabled line.
+	gotDir, gotReload, gotUpload := loadSiteAppsConfig(cfg, nil)
+
+	if gotDir != dir {
+		t.Errorf("dir = %q, want %q", gotDir, dir)
+	}
+	if gotReload != 0 {
+		t.Errorf("reload = %v, want the default for an unparseable value", gotReload)
+	}
+	if !gotUpload {
+		t.Error("upload is off")
+	}
+}
