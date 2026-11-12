@@ -17,7 +17,7 @@ func TestMiniCondorConfigLetsDAGManKeepItsNodeLogUnderTmp(t *testing.T) {
 	if err := writeMiniCondorConfig(path, t.TempDir(), "/usr", nil); err != nil {
 		t.Fatalf("writeMiniCondorConfig: %v", err)
 	}
-	body, err := os.ReadFile(path)
+	body, err := os.ReadFile(path) //nolint:gosec // the test's own file
 	if err != nil {
 		t.Fatalf("reading the config: %v", err)
 	}
