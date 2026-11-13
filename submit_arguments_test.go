@@ -283,3 +283,34 @@ queue
 		})
 	}
 }
+
+// TestShortQueueRowInheritsClusterArguments pins what condor_submit does when a
+// `queue ... from` row leaves a variable out and the arguments expand to
+// nothing. SetArguments finds the chained cluster value and returns without
+// writing, so the proc keeps proc 0's command line -- it does NOT get an empty
+// one under the V2 attribute name. Verified against condor_submit -dry-run:
+// with rows `1 7` and `2`, the proc 1 delta carries no Args or Arguments at all.
+func TestShortQueueRowInheritsClusterArguments(t *testing.T) {
+	sf, err := ParseSubmitFile(strings.NewReader(
+		"executable = /bin/sh\nargs = $(Y)\nqueue A,Y from(1 7\n2\n)\n"))
+	if err != nil {
+		t.Fatalf("ParseSubmitFile: %v", err)
+	}
+	res, err := sf.Submit(1)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(res.ProcAds) != 2 {
+		t.Fatalf("got %d procs, want 2", len(res.ProcAds))
+	}
+	for i, ad := range res.ProcAds {
+		got, _ := ad.EvaluateAttrString("Args")
+		if got != "7" {
+			t.Errorf("proc %d: Args = %q, want %q", i, got, "7")
+		}
+		if _, ok := ad.Lookup("Arguments"); ok {
+			v, _ := ad.EvaluateAttrString("Arguments")
+			t.Errorf("proc %d: has Arguments = %q; condor_submit writes none", i, v)
+		}
+	}
+}
