@@ -8,24 +8,44 @@
 // configuration only ever describes now and a bundle replaced in place
 // leaves nothing behind.
 //
+// A row opens onto both, plus the app's settings. Those settings are
+// the configuration's and are named as the configuration names them --
+// HTTP_API_SITE_APP_<ID>_GROUPS, not a word invented for this page --
+// because the administrator reading them has to be able to put the
+// same string into condor_config_val or a configuration file. The
+// server builds those names: the mapping from an id is not the
+// identity (a hyphen becomes an underscore) and a second
+// implementation of that rule here would be a second thing to get
+// wrong.
+//
 // Publishing from here is deliberately not always available. An
 // uploaded app is served same-origin to the groups it names and can do
 // anything its visitor can, so the site turns it on with
 // HTTP_API_SITE_APPS_UPLOAD; without it this page reads, and says where
 // to put a bundle instead. An app the configuration publishes is never
 // editable here whatever that setting says -- the configuration is the
-// authority, and the server refuses an upload for such an id rather
-// than letting it look like it worked.
+// authority, and the server refuses both an upload and a settings
+// change for such an id rather than letting either look like it
+// worked.
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type AdminSiteApp, type AdminSiteApps } from '@/lib/api';
+import {
+  api,
+  type AdminSiteApp,
+  type AdminSiteApps,
+  type AdminSiteAppConfig,
+  type AdminSiteAppSetting,
+} from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
+import { EVERYONE, parseGroupList, validateSiteAppID } from '@/lib/siteapps';
 
 const TH = 'px-3 py-2';
 const TD = 'px-3 py-2 align-top';
 const INPUT =
   'mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400';
+const BTN =
+  'rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50';
 
 function formatBytes(n?: number): string {
   if (!n) return '';
@@ -53,6 +73,7 @@ function Code({ children }: { children: React.ReactNode }) {
     </code>
   );
 }
+
 
 function AppHistory({ id }: { id: string }) {
   const q = useQuery({
@@ -122,15 +143,365 @@ function AppHistory({ id }: { id: string }) {
   );
 }
 
+// settingValue is what an editor starts from: what is set, not what is
+// merely in force. An empty NAME and a NAME that happens to equal the
+// bundle's label look the same once merged, and only one of them is a
+// parameter the administrator has to maintain.
+function draftFrom(settings: AdminSiteAppSetting[]): Record<string, string> {
+  const d: Record<string, string> = {};
+  for (const s of settings) {
+    if (s.editable) d[s.key] = s.value;
+  }
+  return d;
+}
+
+function SettingValue({ s }: { s: AdminSiteAppSetting }) {
+  return (
+    <>
+      {s.value ? (
+        <span className="font-mono text-xs text-gray-800">{s.value}</span>
+      ) : (
+        <span className="text-xs text-gray-400">not set</span>
+      )}
+      {s.effective ? (
+        <div className="mt-0.5 text-xs text-gray-500">
+          <span className="font-mono">{s.effective}</span> in force
+          {s.effective_from === 'bundle' ? ', from the bundle’s app.yaml' : ' by default'}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+// AppConfig is the app's settings, as the configuration's key-value
+// pairs.
+//
+// What it will not do is imply that a change took effect when it did
+// not. An app the configuration publishes is read-only here, and says
+// so naming condor_reconfig; an app this server stores can be changed,
+// and that change is in force by the time the listing in the response
+// is drawn, because the server rescans before answering.
+function AppConfig({ id }: { id: string }) {
+  const qc = useQueryClient();
+  const [draft, setDraft] = useState<Record<string, string> | null>(null);
+
+  const q = useQuery({
+    queryKey: ['admin', 'site-apps', id, 'config'],
+    queryFn: () => api.admin.siteAppConfig(id),
+  });
+
+  const save = useMutation({
+    mutationFn: (settings: Record<string, string>) => api.admin.setSiteAppConfig(id, settings),
+    onSuccess: (d) => {
+      qc.setQueryData(['admin', 'site-apps'], d);
+      qc.invalidateQueries({ queryKey: ['admin', 'site-apps', id, 'config'] });
+      setDraft(null);
+    },
+  });
+
+  if (q.isLoading) return <p className="text-sm text-gray-400">Loading settings…</p>;
+  if (q.isError) {
+    return (
+      <p className="text-sm text-red-600" data-testid="config-error">
+        {(q.error as Error).message}
+      </p>
+    );
+  }
+  const cfg: AdminSiteAppConfig | undefined = q.data;
+  if (!cfg) return null;
+  const groupsKey = cfg.settings.find((s) => s.setting === 'GROUPS')?.key ?? '';
+  const editing = draft !== null;
+
+  const groupsDraft = editing ? draft[groupsKey] ?? '' : '';
+  const groupsError =
+    editing && groupsKey in draft && parseGroupList(groupsDraft).length === 0
+      ? `${groupsKey} names no groups. Name the groups that may see this app, or ${EVERYONE} for every authenticated user; withdraw it to stop serving it.`
+      : null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-900">Settings</h3>
+          <p className="text-xs text-gray-500">
+            The configuration parameters for this app, named as the configuration names them.
+          </p>
+        </div>
+        {cfg.editable ? (
+          editing ? (
+            <div className="flex shrink-0 gap-2">
+              <button
+                type="button"
+                className={BTN}
+                data-testid="config-cancel"
+                onClick={() => setDraft(null)}
+                disabled={save.isPending}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="rounded-sm bg-brand-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                data-testid="config-save"
+                disabled={save.isPending || groupsError !== null}
+                onClick={() => save.mutate(draft)}
+              >
+                {save.isPending ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className={`${BTN} shrink-0`}
+              data-testid="config-edit"
+              onClick={() => setDraft(draftFrom(cfg.settings))}
+            >
+              Edit
+            </button>
+          )
+        ) : null}
+      </div>
+
+      {cfg.stored_here ? (
+        <p className="text-xs text-gray-600" data-testid="config-note">
+          {cfg.editable ? (
+            <>
+              These are kept by this access point, because <Code>{id}</Code> was published from
+              this page. Saving applies them at once — no <Code>condor_reconfig</Code>. A{' '}
+              <Code>{groupsKey}</Code> in the configuration would take precedence over everything
+              here.
+            </>
+          ) : (
+            <>
+              These are kept by this access point, because <Code>{id}</Code> was published from
+              this page. They cannot be changed here while{' '}
+              <Code>HTTP_API_SITE_APPS_UPLOAD</Code> is off.
+            </>
+          )}
+        </p>
+      ) : (
+        <p className="text-xs text-gray-600" data-testid="config-readonly">
+          <Code>{id}</Code> is published by this access point’s configuration, which takes
+          precedence over anything this page could store. Change these in the configuration and
+          run <Code>condor_reconfig</Code>; the values below are the ones this server read at
+          startup or at the last reconfigure.
+        </p>
+      )}
+
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+        <table className="min-w-full text-sm" data-testid="config-table">
+          <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className={TH}>Parameter</th>
+              <th className={TH}>Value</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {cfg.settings.map((s) => (
+              <tr key={s.key} data-testid={`config-${s.setting.toLowerCase()}`}>
+                <td className={`${TD} whitespace-nowrap`}>
+                  <span className="font-mono text-xs text-gray-700">{s.key}</span>
+                </td>
+                <td className={TD}>
+                  {editing && s.editable ? (
+                    s.setting === 'HOME' ? (
+                      <select
+                        className={INPUT}
+                        data-testid={`config-input-${s.setting.toLowerCase()}`}
+                        value={draft[s.key] ?? ''}
+                        onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
+                      >
+                        <option value="false">false</option>
+                        <option value="true">true</option>
+                      </select>
+                    ) : (
+                      <input
+                        className={INPUT}
+                        data-testid={`config-input-${s.setting.toLowerCase()}`}
+                        value={draft[s.key] ?? ''}
+                        onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
+                      />
+                    )
+                  ) : (
+                    <SettingValue s={s} />
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {groupsError ? (
+        <p className="text-sm text-red-600" data-testid="config-groups-error">
+          {groupsError}
+        </p>
+      ) : null}
+      {save.isError ? (
+        <p className="text-sm text-red-600" data-testid="config-save-error">
+          {(save.error as Error).message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// GroupsField is who may see the app: a checkbox for everyone signed
+// in, or named groups as pills.
+//
+// A raw comma-separated string hid its own mistakes -- a trailing
+// comma, a doubled entry, a stray "*" that quietly published to the
+// whole access point. A pill is a group the form has already accepted,
+// and the "*" is a checkbox because it is a different decision rather
+// than another group name.
+function GroupsField({
+  everyone,
+  groups,
+  pending,
+  error,
+  onEveryone,
+  onGroups,
+  onPending,
+}: {
+  everyone: boolean;
+  groups: string[];
+  pending: string;
+  error: string | null;
+  onEveryone: (v: boolean) => void;
+  onGroups: (g: string[]) => void;
+  onPending: (v: string) => void;
+}) {
+  const [note, setNote] = useState<string | null>(null);
+
+  function commit(raw: string) {
+    const next = [...groups];
+    for (const g of parseGroupList(raw)) {
+      if (g === EVERYONE) {
+        setNote('“*” is every authenticated user — tick the box above instead.');
+        continue;
+      }
+      if (next.some((h) => h.toLowerCase() === g.toLowerCase())) {
+        // Group names are compared case-insensitively by the server,
+        // so smith_lab and Smith_Lab are one group, not two.
+        continue;
+      }
+      next.push(g);
+      setNote(null);
+    }
+    onGroups(next);
+    onPending('');
+  }
+
+  return (
+    <div className="text-sm text-gray-700">
+      <span className="block">Visible to</span>
+      <label className="mt-1 flex items-center gap-2">
+        <input
+          type="checkbox"
+          className="rounded-sm border-gray-300"
+          data-testid="upload-everyone"
+          checked={everyone}
+          onChange={(e) => onEveryone(e.target.checked)}
+        />
+        Everyone signed in to this access point
+      </label>
+      {everyone ? (
+        <p className="mt-1 text-xs text-gray-500">
+          Sent as <Code>{EVERYONE}</Code>, which is what the configuration writes for it.
+        </p>
+      ) : (
+        <>
+          {groups.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {groups.map((g) => (
+                <span
+                  key={g}
+                  className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-800"
+                  data-testid={`group-pill-${g}`}
+                >
+                  {g}
+                  <button
+                    type="button"
+                    className="text-gray-500 hover:text-gray-900"
+                    aria-label={`Remove ${g}`}
+                    data-testid={`group-remove-${g}`}
+                    onClick={() => onGroups(groups.filter((h) => h !== g))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <input
+            className={INPUT}
+            placeholder="smith_lab — press Enter to add"
+            data-testid="upload-groups"
+            value={pending}
+            onChange={(e) => {
+              const v = e.target.value;
+              // A comma is how the configuration separates them, so
+              // typing one finishes the group rather than becoming
+              // part of its name.
+              if (v.includes(',')) commit(v);
+              else onPending(v);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commit(pending);
+              }
+            }}
+            onBlur={() => {
+              if (pending.trim() !== '') commit(pending);
+            }}
+          />
+          {note ? (
+            <p className="mt-1 text-xs text-amber-700" data-testid="upload-groups-note">
+              {note}
+            </p>
+          ) : null}
+        </>
+      )}
+      {error ? (
+        <p className="mt-1 text-sm text-red-600" data-testid="upload-groups-error">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// published is what to say after an upload: which version is now
+// being served and when it was published. Re-publishing an app that is
+// already in the table changes nothing else visible about the row, so
+// without this the administrator has no way to tell from the page that
+// anything happened.
+type Published = { id: string; version?: string; at?: string };
+
 function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
   const [error, setError] = useState<string | null>(null);
+  const [id, setID] = useState('');
+  const [idError, setIDError] = useState<string | null>(null);
+  const [everyone, setEveryone] = useState(false);
+  const [groups, setGroups] = useState<string[]>([]);
+  const [pending, setPending] = useState('');
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [done, setDone] = useState<Published | null>(null);
+
   const upload = useMutation({
     mutationFn: (form: FormData) => api.admin.uploadSiteApp(form),
-    onSuccess: (d) => {
+    onSuccess: (d, form) => {
       setError(null);
+      const want = String(form.get('id') ?? '');
+      const app = d.apps.find((a) => a.id === want);
+      setDone({ id: want, version: app?.version, at: app?.uploaded_at });
       onDone(d);
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => {
+      setDone(null);
+      setError(e.message);
+    },
   });
 
   return (
@@ -139,7 +510,27 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
       data-testid="upload-form"
       onSubmit={(e) => {
         e.preventDefault();
-        upload.mutate(new FormData(e.currentTarget));
+        const form = e.currentTarget;
+        // Whatever is still in the group box counts: nobody should
+        // have to press Enter to mean what they have just typed.
+        const named = pending.trim() === '' ? groups : [...groups, ...parseGroupList(pending)];
+
+        const idProblem = validateSiteAppID(id);
+        const groupProblem =
+          everyone || named.length > 0
+            ? null
+            : 'Name at least one group that may see this app, or tick “everyone signed in”.';
+        setIDError(idProblem);
+        setGroupsError(groupProblem);
+        if (idProblem || groupProblem) return;
+
+        setGroups(named);
+        setPending('');
+        setDone(null);
+        const data = new FormData(form);
+        data.set('id', id.trim());
+        data.set('groups', everyone ? EVERYONE : named.join(', '));
+        upload.mutate(data);
       }}
     >
       <div>
@@ -153,22 +544,46 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
         Id
         <input
           name="id"
-          required
-          pattern="[a-z0-9][a-z0-9_-]*"
           className={INPUT}
           data-testid="upload-id"
+          value={id}
+          onChange={(e) => {
+            setID(e.target.value);
+            setIDError(null);
+          }}
+          // Checked on the way out of the field as well as on submit.
+          // The bundle input is required, so a browser refuses the
+          // submit before any of this runs -- an administrator who
+          // typed a bad id would otherwise be told about the missing
+          // file and nothing else.
+          onBlur={() => {
+            if (id.trim() !== '') setIDError(validateSiteAppID(id));
+          }}
         />
       </label>
-      <label className="block text-sm text-gray-700">
-        Visible to
-        <input
-          name="groups"
-          required
-          placeholder="smith_lab, jones_lab — or * for everyone signed in"
-          className={INPUT}
-          data-testid="upload-groups"
-        />
-      </label>
+      {idError ? (
+        <p className="text-sm text-red-600" data-testid="upload-id-error">
+          {idError}
+        </p>
+      ) : null}
+      <GroupsField
+        everyone={everyone}
+        groups={groups}
+        pending={pending}
+        error={groupsError}
+        onEveryone={(v) => {
+          setEveryone(v);
+          setGroupsError(null);
+        }}
+        onGroups={(g) => {
+          setGroups(g);
+          setGroupsError(null);
+        }}
+        onPending={(v) => {
+          setPending(v);
+          setGroupsError(null);
+        }}
+      />
       <label className="block text-sm text-gray-700">
         Bundle
         <input
@@ -195,6 +610,28 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
           {error}
         </p>
       ) : null}
+      {upload.isPending ? (
+        <p className="text-sm text-gray-600" data-testid="upload-busy">
+          Publishing {id.trim()}… the bundle is being stored and the directory rescanned.
+        </p>
+      ) : null}
+      {done && !upload.isPending ? (
+        <p
+          className="rounded-sm border border-emerald-300 bg-emerald-50 px-2 py-1 text-sm text-emerald-900"
+          data-testid="upload-result"
+        >
+          Published <Code>{done.id}</Code>
+          {done.version ? (
+            <>
+              {' '}
+              version <strong>{done.version}</strong>
+            </>
+          ) : (
+            ' (the bundle names no version)'
+          )}
+          {done.at ? ` at ${formatWhen(done.at)}` : ''}. It is being served now.
+        </p>
+      ) : null}
       <button
         type="submit"
         disabled={upload.isPending}
@@ -213,8 +650,8 @@ function Header() {
       <h1 className="text-2xl font-bold text-gray-900">Site apps</h1>
       <p className="text-sm text-gray-500">
         Single-page apps this access point serves under <Code>/site/&lt;id&gt;/</Code>, each
-        visible only to the groups it names. The table is what is published now; the history
-        beneath an app is what was published before.
+        visible only to the groups it names. The table is what is published now; open a row for
+        its settings and what was published before.
       </p>
     </div>
   );
@@ -298,69 +735,19 @@ export default function AdminSiteAppsPage() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {data.apps.map((a: AdminSiteApp) => (
-                <tr key={a.id} data-testid={`app-${a.id}`}>
-                  <td className={TD}>
-                    <a href={a.url} className="font-medium text-brand-700 hover:underline">
-                      {a.name}
-                    </a>
-                    <div className="text-xs text-gray-500">{a.id}</div>
-                  </td>
-                  <td className={TD}>
-                    {a.version || <span className="text-gray-400">unversioned</span>}
-                    <div className="mt-0.5 text-xs text-gray-500">
-                      <Code>{shortDigest(a.digest)}</Code>
-                      {a.attested ? ' · checksummed' : ''}
-                    </div>
-                  </td>
-                  <td className={TD}>
-                    {a.groups.join(', ')}
-                    {a.home ? <div className="text-xs text-gray-500">home</div> : null}
-                  </td>
-                  <td className={`${TD} text-gray-500`}>{a.origin}</td>
-                  <td className={TD}>
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setOpen(open === a.id ? null : a.id)}
-                        className="rounded-sm border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
-                        data-testid={`history-${a.id}`}
-                      >
-                        {open === a.id ? 'Hide history' : 'History'}
-                      </button>
-                      {/* Only an uploaded app can be withdrawn here. One the
-                          configuration publishes is changed where it was
-                          decided, and the server refuses it anyway. */}
-                      {a.managed && data.upload_allowed ? (
-                        <ConfirmButton
-                          label="Withdraw"
-                          confirmLabel="Confirm"
-                          compact
-                          onConfirm={() => withdraw.mutate(a.id)}
-                        />
-                      ) : null}
-                    </div>
-                  </td>
-                </tr>
+                <AppRows
+                  key={a.id}
+                  app={a}
+                  open={open === a.id}
+                  uploadAllowed={data.upload_allowed}
+                  onToggle={() => setOpen(open === a.id ? null : a.id)}
+                  onWithdraw={() => withdraw.mutate(a.id)}
+                />
               ))}
             </tbody>
           </table>
         </div>
       )}
-
-      {open ? (
-        <section className="space-y-2" data-testid="history-section">
-          <div>
-            <h2 className="text-sm font-semibold text-gray-900">
-              What has been served: {open}
-            </h2>
-            <p className="text-xs text-gray-500">
-              One row per period this app was served from one bundle under one policy. A new row
-              means the bundle or who could see it changed.
-            </p>
-          </div>
-          <AppHistory id={open} />
-        </section>
-      ) : null}
 
       {data.upload_allowed ? (
         <UploadForm onDone={(d) => qc.setQueryData(['admin', 'site-apps'], d)} />
@@ -380,5 +767,108 @@ export default function AdminSiteAppsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// AppRows is one app: the row, and the detail it opens onto.
+function AppRows({
+  app: a,
+  open,
+  uploadAllowed,
+  onToggle,
+  onWithdraw,
+}: {
+  app: AdminSiteApp;
+  open: boolean;
+  uploadAllowed: boolean;
+  onToggle: () => void;
+  onWithdraw: () => void;
+}) {
+  return (
+    <>
+      <tr
+        data-testid={`app-${a.id}`}
+        aria-expanded={open}
+        className={`cursor-pointer hover:bg-gray-50 ${open ? 'bg-gray-50' : ''}`}
+        onClick={onToggle}
+      >
+        <td className={TD}>
+          <a
+            href={a.url}
+            className="font-medium text-brand-700 hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {a.name}
+          </a>
+          <div className="text-xs text-gray-500">{a.id}</div>
+        </td>
+        <td className={TD}>
+          {a.version || <span className="text-gray-400">unversioned</span>}
+          <div className="mt-0.5 text-xs text-gray-500">
+            <Code>{shortDigest(a.digest)}</Code>
+            {a.attested ? ' · checksummed' : ''}
+            {a.size_bytes ? ` · ${formatBytes(a.size_bytes)}` : ''}
+          </div>
+          {a.uploaded_at ? (
+            <div className="mt-0.5 text-xs text-gray-500" data-testid={`published-${a.id}`}>
+              published {formatWhen(a.uploaded_at)}
+            </div>
+          ) : null}
+        </td>
+        <td className={TD}>
+          {a.groups.join(', ')}
+          {a.home ? <div className="text-xs text-gray-500">home</div> : null}
+        </td>
+        <td className={`${TD} text-gray-500`}>
+          {a.origin}
+          {a.uploaded_by ? <div className="text-xs">by {a.uploaded_by}</div> : null}
+        </td>
+        <td className={TD}>
+          <div
+            className="flex items-center justify-end gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={onToggle}
+              className={BTN}
+              data-testid={`history-${a.id}`}
+            >
+              {open ? 'Hide' : 'Details'}
+            </button>
+            {/* Only an uploaded app can be withdrawn here. One the
+                configuration publishes is changed where it was
+                decided, and the server refuses it anyway. */}
+            {a.managed && uploadAllowed ? (
+              <ConfirmButton
+                label="Withdraw"
+                confirmLabel="Confirm"
+                compact
+                onConfirm={onWithdraw}
+              />
+            ) : null}
+          </div>
+        </td>
+      </tr>
+      {open ? (
+        <tr data-testid={`details-${a.id}`}>
+          <td colSpan={5} className="bg-gray-50 px-3 py-3">
+            <div className="space-y-4" data-testid="history-section">
+              <AppConfig id={a.id} />
+              <div className="space-y-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">What has been served</h3>
+                  <p className="text-xs text-gray-500">
+                    One row per period this app was served from one bundle under one policy. A
+                    new row means the bundle or who could see it changed.
+                  </p>
+                </div>
+                <AppHistory id={a.id} />
+              </div>
+            </div>
+          </td>
+        </tr>
+      ) : null}
+    </>
   );
 }

@@ -17,6 +17,7 @@ package siteapps
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -253,6 +254,37 @@ func (s *UploadStore) Put(ctx context.Context, u Upload) error {
 		return fmt.Errorf("record uploaded app %q: %w", u.AppID, err)
 	}
 	return nil
+}
+
+// Get returns one uploaded app's record, and whether there is one.
+//
+// A row apiece rather than List plus a scan by the caller: the config
+// editor reads one app, and the settings it does not change have to be
+// carried across from the row that is already there.
+func (s *UploadStore) Get(ctx context.Context, id string) (Upload, bool, error) {
+	if s == nil || s.db == nil {
+		return Upload{}, false, nil
+	}
+	var (
+		u             Upload
+		groups        string
+		home, enabled int
+		at            int64
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT app_id, app_groups, home, enabled, name, description, icon,
+		       uploaded_by, uploaded_at, digest, size_bytes
+		  FROM site_app_uploads WHERE app_id = ?`, id).
+		Scan(&u.AppID, &groups, &home, &enabled, &u.Name, &u.Description, &u.Icon,
+			&u.UploadedBy, &at, &u.Digest, &u.SizeBytes)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return Upload{}, false, nil
+	case err != nil:
+		return Upload{}, false, fmt.Errorf("read uploaded app %q: %w", id, err)
+	}
+	u.Groups, u.Home, u.Enabled, u.UploadedAt = ParseGroupList(groups), home != 0, enabled != 0, time.Unix(at, 0)
+	return u, true, nil
 }
 
 // Delete forgets an uploaded app's policy. It does not remove the

@@ -2,6 +2,9 @@ import type { Page } from '@playwright/test';
 import type {
   AccessPointsResponse,
   AdminLogsResponse,
+  AdminSiteApps,
+  AdminSiteAppConfig,
+  AdminSiteAppHistory,
   DashboardActivityResponse,
   DashboardStats,
   IssuesResponse,
@@ -210,6 +213,97 @@ export const sessionFixture: Session = {
   is_admin: true,
 };
 
+// Site apps, for the admin page. One app the configuration publishes
+// -- which is the read-only half of that page, and the half a frozen
+// fixture can state honestly.
+export const siteAppsFixture: AdminSiteApps = {
+  enabled: true,
+  upload_allowed: true,
+  directory: '/etc/condor/webapps',
+  apps: [
+    {
+      id: 'cryoem',
+      name: 'CryoEM Pipeline',
+      groups: ['smith_lab'],
+      home: false,
+      attested: true,
+      digest: 'a3f9c1d2e4b5aa0011223344',
+      version: '2.1.0',
+      size_bytes: 2_400_000,
+      origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+      managed: false,
+      url: '/site/cryoem/',
+    },
+  ],
+};
+
+export const siteAppConfigFixture: AdminSiteAppConfig = {
+  id: 'cryoem',
+  origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+  stored_here: false,
+  editable: false,
+  settings: [
+    {
+      key: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+      setting: 'GROUPS',
+      value: 'smith_lab',
+      editable: false,
+    },
+    { key: 'HTTP_API_SITE_APP_CRYOEM_HOME', setting: 'HOME', value: '', editable: false },
+    {
+      key: 'HTTP_API_SITE_APP_CRYOEM_ENABLED',
+      setting: 'ENABLED',
+      value: '',
+      effective: 'true',
+      effective_from: 'default',
+      editable: false,
+    },
+    {
+      key: 'HTTP_API_SITE_APP_CRYOEM_NAME',
+      setting: 'NAME',
+      value: '',
+      effective: 'CryoEM Pipeline',
+      effective_from: 'bundle',
+      editable: false,
+    },
+    {
+      key: 'HTTP_API_SITE_APP_CRYOEM_DESCRIPTION',
+      setting: 'DESCRIPTION',
+      value: '',
+      editable: false,
+    },
+    { key: 'HTTP_API_SITE_APP_CRYOEM_ICON', setting: 'ICON', value: '', editable: false },
+  ],
+};
+
+export const siteAppHistoryFixture: { id: string; history: AdminSiteAppHistory[] } = {
+  id: 'cryoem',
+  history: [
+    {
+      digest: 'a3f9c1d2e4b5aa0011223344',
+      attested: true,
+      version: '2.1.0',
+      groups: ['smith_lab'],
+      home: false,
+      origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+      size_bytes: 2_400_000,
+      first_seen: '2026-11-03T10:00:00Z',
+      last_seen: '2026-11-12T09:00:00Z',
+    },
+    {
+      digest: 'bbbb2222cccc3333dddd4444',
+      attested: false,
+      version: '2.0.0',
+      groups: ['smith_lab', 'jones_lab'],
+      home: false,
+      origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+      size_bytes: 2_100_000,
+      first_seen: '2026-09-28T10:00:00Z',
+      last_seen: '2026-11-03T10:00:00Z',
+    },
+  ],
+};
+
 // One long line carrying a full user_agent: this is the exact shape
 // that collapsed the message column to one letter per line (#224), so
 // the smoke suite should always carry one. LogEntry.fields is
@@ -366,6 +460,9 @@ export async function installApiFixtures(page: Page, opts: { multiAP?: boolean }
       ],
     },
     '/api/v1/admin/logs': adminLogsFixture,
+    '/api/v1/admin/site-apps': siteAppsFixture,
+    '/api/v1/admin/site-apps/cryoem/config': siteAppConfigFixture,
+    '/api/v1/admin/site-apps/cryoem/history': siteAppHistoryFixture,
     // The sidebar's pending access request badge, for an admin.
     '/api/v1/placement/admin/requests/count': { pending: 0 },
     // Generated from simulated jobs, so its figures agree with each other
