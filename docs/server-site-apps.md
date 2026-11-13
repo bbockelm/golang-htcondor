@@ -181,8 +181,8 @@ HTTP_API_WEBUI_APP_ONLY_GROUP = smith_lab, jones_lab
 ```
 
 Members land in their app instead of the dashboard, and the navigation
-collapses to their apps. A bar across the top of every app offers their
-other apps and an **Expert mode** link that opens the full console for
+collapses to their apps. The bar across the top of every app (below)
+offers them an **Expert mode** link, which opens the full console for
 that browser session.
 
 **This is presentation, not authorization.** The API is unchanged, every
@@ -200,6 +200,37 @@ Users with more than one `home` app land on `/site/`, which lists the
 apps they can open. That page is also the right thing to put in a lab
 wiki: it resolves per-viewer, so the same link sends each person to
 their own set.
+
+## The bar
+
+Every page of every app carries a bar across the top: the site's name,
+the app you are in, the caller's other apps, and the way back to the
+full console. It is drawn into a shadow root with `all:initial`, so the
+app's stylesheet cannot reach it and its own styles cannot leak into
+the app.
+
+The way back is always there. An app-only session gets **Expert mode**,
+which opens the console for that browser session; everybody else gets
+**Full console**, a plain link to `/`. It is there even when there is
+only one app and nothing to switch to: a user who can use the console
+must always be offered it.
+
+The bar sets `--htcondor-shell-height` on `<html>` and pushes the page
+down by that much. An app with a fixed header of its own should clear
+it:
+
+```css
+.my-header { top: var(--htcondor-shell-height, 0px); }
+```
+
+An app that cannot live under it declines:
+
+```html
+<meta name="htcondor-shell" content="none">
+```
+
+That costs the app the switcher and the way back, so `/site/` stays one
+URL away and always lists what the caller can open.
 
 ## Writing one
 

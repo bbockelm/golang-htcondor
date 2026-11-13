@@ -397,6 +397,53 @@ func TestShellClearsItselfFromTheComputedPadding(t *testing.T) {
 	}
 }
 
+// The decline meta tag is spelled in two places -- the Go constant that
+// documents it and the script that looks for it -- since the script
+// became a file of its own. They have to agree: a drift would leave an
+// app that opted out with a bar it cannot survive.
+func TestShellHonoursTheDeclineMeta(t *testing.T) {
+	h := twoAppHandler(t, true, "smith_lab")
+	js := get(h, "/site/_shell.js").Body.String()
+
+	if !strings.Contains(js, "meta["+shellMeta+"]") {
+		t.Errorf("the script does not look for meta[%s], so an app cannot decline the overlay", shellMeta)
+	}
+}
+
+// The access point serves every page under Content-Security-Policy:
+// default-src 'self'. A font, a stylesheet or a script from anywhere
+// else would be blocked, and the bar would render without whatever it
+// asked for -- so it must ask for nothing.
+func TestShellLoadsNothingExternal(t *testing.T) {
+	h := twoAppHandler(t, true, "smith_lab")
+	js := get(h, "/site/_shell.js").Body.String()
+
+	for _, external := range []string{"http://", "https://", "//fonts.", "@import", "cdn."} {
+		if strings.Contains(js, external) {
+			t.Errorf("the shell reaches outside the origin (%q); the page's CSP is default-src 'self'", external)
+		}
+	}
+}
+
+// The bar is part of this product's navigation and is coloured like it:
+// the values are the web UI's own Tailwind theme (globals.css), not an
+// approximation. Pinned because the first version invented a grey.
+func TestShellUsesTheConsoleBrandColours(t *testing.T) {
+	h := twoAppHandler(t, true, "smith_lab")
+	js := get(h, "/site/_shell.js").Body.String()
+
+	// The declaration, not the hex on its own: the script also names
+	// these values in a comment, and a comment is not a colour.
+	for what, decl := range map[string]string{
+		"the sidebar's background (ink-950)": "background:#0a0a0a",
+		"the primary button (brand-600)":     "a.leave{background:#b61f24",
+	} {
+		if !strings.Contains(js, decl) {
+			t.Errorf("the bar does not use %s: no %q in its stylesheet", what, decl)
+		}
+	}
+}
+
 // twoAppHandler serves the two-app directory to a caller holding the
 // given groups.
 func twoAppHandler(t *testing.T, authenticated bool, groups ...string) *Handler {

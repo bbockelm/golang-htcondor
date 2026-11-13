@@ -450,3 +450,47 @@ func TestSubmitFileJobAdEnvSet(t *testing.T) {
 		t.Errorf("Environment = %q lost _CONDOR_DAGMAN_LOG", env)
 	}
 }
+
+// TestSubmitFileCarriesNoResourceRequest is a guard against a future
+// change, not a fix for anything.
+//
+// condor_submit appends `&& (TARGET.Memory >= RequestMemory)` to a job's
+// Requirements whenever request_memory is set, special-casing only the VM
+// universe (submit_utils.cpp; this project's own submit library does the
+// same, see submit_requirements.go). A scheduler-universe job is matched
+// against no machine ad, so that clause is UNDEFINED and the DAGMan
+// manager never starts: it sits idle with nothing in any log to say why.
+//
+// The generated file carries no request_* line today, and nothing said so.
+// This is what keeps it that way.
+//
+// What it does NOT say is that the manager job's ad is free of such a
+// clause: the submit library applies the access point's
+// JOB_DEFAULT_REQUEST_* values on its own, and the ad it builds from this
+// very file carries RequestMemory and a TARGET.Memory requirement without
+// a request_* line anywhere. That is a separate problem, under separate
+// investigation, and asserting on it here would pin behaviour this
+// package does not own.
+//
+// SubmitOptions.Append is likewise not covered: it is the caller's own
+// submit text, and somebody who writes a request there asked for it.
+func TestSubmitFileCarriesNoResourceRequest(t *testing.T) {
+	opt := testSubmitOptions()
+	opt.MaxIdle, opt.MaxJobs, opt.MaxPre, opt.MaxPost = 10, 20, 2, 2
+	opt.BinDir = "/opt/condor/bin"
+	opt.ConfigFile = "wf.dagman.cfg"
+
+	text, err := SubmitFile(opt)
+	if err != nil {
+		t.Fatalf("SubmitFile: %v", err)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		cmd, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(cmd)), "request_") {
+			t.Errorf("the generated submit file asks for a resource: %q\n%s", strings.TrimSpace(line), text)
+		}
+	}
+}
