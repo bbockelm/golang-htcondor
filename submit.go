@@ -75,6 +75,16 @@ type SubmitFile struct {
 	// by every setResourceRequests; see defaultDiskEvaluates.
 	defaultDisk string
 
+	// clusterArgs is the arguments attribute proc 0 wrote: the name
+	// (Args or Arguments) and its value, or "" when proc 0 wrote none.
+	// condor_submit chains every later proc's ad to proc 0's, so a proc
+	// whose `arguments` expands to nothing takes SetArguments' "the ad
+	// already carries one" branch and writes nothing, leaving proc 0's
+	// value visible. These ads are standalone, so the value is carried
+	// forward instead. See setArguments.
+	clusterArgsAttr  string
+	clusterArgsValue string
+
 	// wantTransferMethods is the set of file transfer plugin methods the
 	// job ad being built needs and does not supply itself, in the order
 	// SetRequirements writes its clauses. Reset by every
@@ -737,7 +747,7 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	}
 
 	// Set arguments
-	if err := sf.setArguments(ad); err != nil {
+	if err := sf.setArguments(ad, jobID.Proc); err != nil {
 		return nil, err
 	}
 
@@ -1127,6 +1137,16 @@ func (sf *SubmitFile) executableIsAFile() bool {
 	return true
 }
 
+// setArgsAttr writes the arguments attribute and, on proc 0, remembers it as
+// the value later procs inherit through the cluster ad. Writing through here
+// rather than ad.Set keeps the two in step.
+func (sf *SubmitFile) setArgsAttr(ad *classad.ClassAd, proc int, attr, value string) {
+	_ = ad.Set(attr, value)
+	if proc == 0 {
+		sf.clusterArgsAttr, sf.clusterArgsValue = attr, value
+	}
+}
+
 // setArguments stores the job's command line, mirroring
 // SubmitHash::SetArguments.
 //
@@ -1144,7 +1164,7 @@ func (sf *SubmitFile) executableIsAFile() bool {
 // V1 input. Go wrote `Args = ""` there, which is the V1 name for the same
 // empty list, and an attribute name that disagrees with condor_submit's is
 // the kind of difference that only shows up on the execute node.
-func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
+func (sf *SubmitFile) setArguments(ad *classad.ClassAd, proc int) error {
 	args1, hasArgs1 := sf.submitCommandAlt("arguments", "args")
 	// No alternate name for arguments2: ATTR_JOB_ARGUMENTS2 is the same
 	// attribute as ATTR_JOB_ARGUMENTS1's alternate, which would make the
@@ -1161,7 +1181,7 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse arguments2: %w", err)
 		}
-		_ = ad.Set("Arguments", joinArgsV2(args))
+		sf.setArgsAttr(ad, proc, "Arguments", joinArgsV2(args))
 	case hasArgs1 && args1 != "":
 		// Parsed into arguments and written back out, not passed through:
 		// condor_submit's ArgList canonicalises as it goes, so the doubled
@@ -1173,12 +1193,20 @@ func (sf *SubmitFile) setArguments(ad *classad.ClassAd) error {
 			return fmt.Errorf("failed to parse arguments: %w", err)
 		}
 		if wasV1 {
-			_ = ad.Set("Args", joinArgsV1(args))
+			sf.setArgsAttr(ad, proc, "Args", joinArgsV1(args))
 		} else {
-			_ = ad.Set("Arguments", joinArgsV2(args))
+			sf.setArgsAttr(ad, proc, "Arguments", joinArgsV2(args))
 		}
+	case proc > 0 && sf.clusterArgsAttr != "":
+		// Nothing to say, and proc 0 said something: condor_submit reads
+		// the chained value and returns without writing
+		// (SubmitHash::SetArguments, the ATTR_JOB_ARGUMENTS1/2 Lookup).
+		// A short `queue A,Y from` row reaches here -- the variable the
+		// row leaves out expands to nothing, which is not a request for
+		// an empty command line but a request for the cluster's.
+		_ = ad.Set(sf.clusterArgsAttr, sf.clusterArgsValue)
 	default:
-		_ = ad.Set("Arguments", "")
+		sf.setArgsAttr(ad, proc, "Arguments", "")
 	}
 	// setArguments ends with the java check, because the class to run is an
 	// argument: a java job that named none is refused here.
