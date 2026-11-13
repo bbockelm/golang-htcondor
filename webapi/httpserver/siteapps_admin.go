@@ -80,6 +80,15 @@ type AdminSiteApp struct {
 	Managed bool `json:"managed"`
 	// URL is where it is served.
 	URL string `json:"url"`
+	// SizeBytes is the bundle file's size; 0 for a directory bundle.
+	SizeBytes int64 `json:"size_bytes,omitempty"`
+	// UploadedBy and UploadedAt are who published this bundle through
+	// the web interface and when. Absent for an app the configuration
+	// publishes: nothing records when a file was copied into the
+	// directory, and the audit trail's first_seen is when a scan first
+	// saw it rather than when it was put there.
+	UploadedBy string     `json:"uploaded_by,omitempty"`
+	UploadedAt *time.Time `json:"uploaded_at,omitempty"`
 }
 
 // AdminSiteAppsResponse is GET /api/v1/admin/site-apps.
@@ -139,6 +148,17 @@ func (s *Handler) handleAdminSiteApps(w http.ResponseWriter, r *http.Request) {
 		}
 		s.adminSiteAppHistory(w, r, strings.TrimSuffix(rest, "/history"))
 		return
+	case strings.HasSuffix(rest, "/config"):
+		id := strings.TrimSuffix(rest, "/config")
+		switch r.Method {
+		case http.MethodGet:
+			s.adminSiteAppConfig(w, r, id)
+		case http.MethodPut:
+			s.adminSetSiteAppConfig(w, r, id)
+		default:
+			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		}
+		return
 	}
 	if strings.Contains(rest, "/") {
 		s.writeError(w, http.StatusNotFound, "Not found")
@@ -152,7 +172,7 @@ func (s *Handler) handleAdminSiteApps(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminListSiteApps answers what is published now.
-func (s *Handler) adminListSiteApps(w http.ResponseWriter, _ *http.Request) {
+func (s *Handler) adminListSiteApps(w http.ResponseWriter, r *http.Request) {
 	resp := AdminSiteAppsResponse{Apps: []AdminSiteApp{}}
 	if s.siteApps == nil {
 		s.writeJSON(w, http.StatusOK, resp)
@@ -161,15 +181,35 @@ func (s *Handler) adminListSiteApps(w http.ResponseWriter, _ *http.Request) {
 	resp.Enabled = true
 	resp.UploadAllowed = s.siteAppUploadAllowed()
 	resp.Directory = s.siteApps.Dir()
+	// Who published each uploaded bundle, and when. Read once here
+	// rather than per app, and a failure costs the attribution rather
+	// than the listing: an administrator looking at what is served
+	// must not be shown an error because an audit column could not be
+	// read.
+	uploads := map[string]siteapps.Upload{}
+	if s.siteAppUploads != nil {
+		if rows, err := s.siteAppUploads.List(r.Context()); err != nil {
+			s.logger.Warn(logging.DestinationHTTP, "site app uploads", "error", err)
+		} else {
+			for _, u := range rows {
+				uploads[u.AppID] = u
+			}
+		}
+	}
 	for _, e := range s.siteApps.All() {
-		resp.Apps = append(resp.Apps, AdminSiteApp{
+		app := AdminSiteApp{
 			ID: e.App.ID, Name: e.App.Name, Description: e.App.Description,
 			Icon: e.App.Icon, Groups: e.App.Groups, Home: e.App.Home,
 			Version: e.App.Version, Revision: e.App.Revision,
 			Digest: e.ContentDigest(), Attested: e.App.Digest != "",
 			Origin: e.App.Origin, Managed: e.App.Origin == siteapps.OriginUpload,
-			URL: siteapps.MountPath(e.App.ID),
-		})
+			URL: siteapps.MountPath(e.App.ID), SizeBytes: e.SizeBytes(),
+		}
+		if u, ok := uploads[e.App.ID]; ok && app.Managed {
+			at := u.UploadedAt
+			app.UploadedBy, app.UploadedAt = u.UploadedBy, &at
+		}
+		resp.Apps = append(resp.Apps, app)
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }

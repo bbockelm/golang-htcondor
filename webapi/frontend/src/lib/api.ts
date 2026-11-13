@@ -1614,6 +1614,40 @@ export interface AdminSiteApp {
   // publishes is read-only here, whatever the upload setting says.
   managed: boolean;
   url: string;
+  size_bytes?: number;
+  // Who published this bundle through the web interface, and when.
+  // Absent for an app the configuration publishes: nothing records
+  // when a file was copied into the bundle directory.
+  uploaded_by?: string;
+  uploaded_at?: string;
+}
+
+// One of an app's configuration parameters, named as the
+// configuration names it. The server builds the name because the
+// mapping from an id is not the identity -- a hyphen becomes an
+// underscore -- and a second implementation of that rule here would
+// be a second thing to get wrong.
+export interface AdminSiteAppSetting {
+  key: string;
+  setting: string;
+  value: string;
+  // What is in force when that is not `value`: the bundle's own label
+  // or the default for a flag.
+  effective?: string;
+  effective_from?: string;
+  editable: boolean;
+}
+
+export interface AdminSiteAppConfig {
+  id: string;
+  origin?: string;
+  // Whether these values are this server's own record of an uploaded
+  // app rather than the HTCondor configuration. It is the difference
+  // between a change that takes effect now and one that needs
+  // condor_reconfig.
+  stored_here: boolean;
+  editable: boolean;
+  settings: AdminSiteAppSetting[];
 }
 
 export interface AdminSiteApps {
@@ -2702,6 +2736,20 @@ export const api = {
     withdrawSiteApp: (id: string): Promise<AdminSiteApps> =>
       fetchJSON(`${BASE}/admin/site-apps/${encodeURIComponent(id)}`, {
         method: "DELETE",
+      }),
+    // An app's settings as configuration parameters, and whether this
+    // server will accept a change to them.
+    siteAppConfig: (id: string): Promise<AdminSiteAppConfig> =>
+      fetchJSON(`${BASE}/admin/site-apps/${encodeURIComponent(id)}/config`),
+    // Keyed by the full parameter name. Returns the listing as it
+    // stands after the rescan the change triggers.
+    setSiteAppConfig: (
+      id: string,
+      settings: Record<string, string>,
+    ): Promise<AdminSiteApps> =>
+      fetchJSON(`${BASE}/admin/site-apps/${encodeURIComponent(id)}/config`, {
+        method: "PUT",
+        body: JSON.stringify({ settings }),
       }),
 
     listAPIKeys: (): Promise<{

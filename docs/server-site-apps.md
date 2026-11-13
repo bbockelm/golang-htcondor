@@ -146,6 +146,25 @@ Leaving this off is a reasonable choice for an access point whose
 configuration is managed centrally: the page still shows what is
 published and what has been, and says where to put a bundle.
 
+### Settings on the page
+
+Opening an app's row shows its settings as the parameters above:
+`HTTP_API_SITE_APP_<ID>_GROUPS` and its siblings, under the names
+`condor_config_val` answers to, with what is set and what is merely in
+force -- a `NAME` nobody set reads as the bundle's own label rather
+than as a value to maintain.
+
+For an app this page published, those settings can be changed there.
+They are kept in the application database, and the change takes effect
+on the rescan the write triggers: no `condor_reconfig`, no restart.
+`ENABLED` is shown and not settable, because an app it disables leaves
+the page with no way back; **Withdraw** is how to stop serving one.
+
+For an app the configuration publishes, they are read-only and say so.
+Nothing typed into this access point could take effect for such an id
+-- the configuration is consulted first, and the server refuses the
+change rather than recording one that would never apply.
+
 ## What has been served
 
 The configuration says what you intend. It cannot tell you what was
