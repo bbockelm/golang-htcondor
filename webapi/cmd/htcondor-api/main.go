@@ -37,6 +37,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/version"
 	"github.com/bbockelm/golang-htcondor/webapi/apassign"
 	"github.com/bbockelm/golang-htcondor/webapi/apiad"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
@@ -3679,6 +3680,16 @@ func generateServerToken(tempDir, trustDomain string) (string, error) {
 //	HTTP_API_DBMIRROR_REQUIRED never fall back to the schedd; a read the
 //	                           mirror cannot serve fails instead
 //
+// It also applies the read ceilings, which bound how many records one
+// mirror-served response carries. A caller asking for more is clamped to
+// them and told so (has_more), so raising them is how an operator serves
+// a report that wants more records per request than the defaults allow.
+//
+//	HTTP_API_DBMIRROR_MAX_LIMIT            whole-ad reads (default 2000)
+//	HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT  reads that name a projection,
+//	                                       whose rows are far smaller
+//	                                       (default 10000)
+//
 // loadCCBStreaming decides whether this server may ask a broker to relay a CCB
 // connection rather than having the execute node dial back to it.
 //
@@ -3986,7 +3997,30 @@ func loadDBMirrorConfig(cfg *config.Config, logger *logging.Logger) (name, addre
 			"htcondordb mirror is REQUIRED: job and history reads that the mirror cannot serve will fail instead of using the schedd",
 			"name", name, "address", address)
 	}
+	dbmirror.MaxLimit = dbMirrorCeiling(cfg, logger, "HTTP_API_DBMIRROR_MAX_LIMIT", dbmirror.MaxLimit)
+	dbmirror.MaxProjectedLimit = dbMirrorCeiling(cfg, logger,
+		"HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT", dbmirror.MaxProjectedLimit)
 	return name, address, required
+}
+
+// dbMirrorCeiling reads one read-ceiling knob, keeping def when it is
+// unset or unusable. Unusable is a warning rather than fatal: a bad
+// ceiling costs a caller records it can page for, where a bad
+// HTTP_API_DBMIRROR_REQUIRED would silently change which daemon takes
+// the load.
+func dbMirrorCeiling(cfg *config.Config, logger *logging.Logger, name string, def int) int {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n <= 0 {
+		logger.Warn(logging.DestinationHTTP, "Ignoring "+name+"; expected a positive integer",
+			"value", raw, "error", err)
+		return def
+	}
+	logger.Info(logging.DestinationHTTP, "htcondordb mirror read ceiling set", "knob", name, "records", n)
+	return n
 }
 
 // defaultPingInterval is the cadence used when HTTP_API_PING_INTERVAL is

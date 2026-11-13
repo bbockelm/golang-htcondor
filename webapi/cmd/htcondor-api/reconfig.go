@@ -364,6 +364,8 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_DBMIRROR_NAME"},
 	{name: "HTTP_API_DBMIRROR_ADDRESS"},
 	{name: "HTTP_API_DBMIRROR_REQUIRED"},
+	{name: "HTTP_API_DBMIRROR_MAX_LIMIT"},
+	{name: "HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT"},
 
 	// Multi-AP mode: which mode the server runs in, and what it reads
 	// from, are decided when the handler is built.

@@ -52,23 +52,6 @@ const (
 	// means "everything" rather than "unspecified". ClampLimit says what
 	// that maps to.
 	DefaultLimit = 200
-	// MaxLimit is the ceiling on a single mirror read of whole ads.
-	//
-	// A row here is an entire job ad -- seventy-odd attributes, tens of
-	// kilobytes -- so the ceiling is low because the rows are fat, not
-	// because the read is dangerous. It is not a memory bound: rows are
-	// parsed, encoded and written to the response one at a time
-	// (mirrorRowStream.write), so nothing accumulates whatever the limit
-	// says.
-	MaxLimit = 2000
-	// MaxProjectedLimit is the ceiling when the caller named the
-	// attributes it wants.
-	//
-	// A projected row is a few hundred bytes rather than tens of
-	// kilobytes, so the same response budget buys far more of them, and
-	// the listings that page through a queue all project. At 200 a
-	// 60,000-job queue is three hundred round trips; this makes it six.
-	MaxProjectedLimit = 10000
 	// InfoTTL is how long a discovered mirror ad is reused before the
 	// collector is asked again.
 	InfoTTL = 30 * time.Second
@@ -88,6 +71,32 @@ const (
 	// accepts the connection and then hangs cannot wedge the loop for the
 	// life of the daemon.
 	PollTimeout = 10 * time.Second
+)
+
+// The read ceilings. Process-wide policy with the same lifetime rule as
+// the tolerances below: set once at startup, from
+// HTTP_API_DBMIRROR_MAX_LIMIT and HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT.
+//
+// Neither is a memory bound -- rows are parsed, encoded and written to
+// the response one at a time (mirrorRowStream.write), so nothing
+// accumulates whatever the limit says. They bound how big one response
+// gets, which is why the two differ by the width of a row.
+var (
+	// MaxLimit is the ceiling on a single mirror read of whole ads.
+	//
+	// A row here is an entire job ad -- seventy-odd attributes, tens of
+	// kilobytes -- so the ceiling is low because the rows are fat, not
+	// because the read is dangerous.
+	MaxLimit = 2000
+
+	// MaxProjectedLimit is the ceiling when the caller named the
+	// attributes it wants.
+	//
+	// A projected row is a few hundred bytes rather than tens of
+	// kilobytes, so the same response budget buys far more of them, and
+	// the listings that page through a queue all project. At 200 a
+	// 60,000-job queue is three hundred round trips; this makes it six.
+	MaxProjectedLimit = 10000
 )
 
 // The routing tolerances. Process-wide policy, meant to be set once at

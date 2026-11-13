@@ -22,6 +22,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
+	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
 	"github.com/bbockelm/golang-htcondor/webapi/matchanalyzer"
 	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
 	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
@@ -849,7 +850,9 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					"properties": map[string]interface{}{
 						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint expression over completed-job attributes (e.g. 'ExitCode != 0'). Empty matches all your jobs."},
 						"projection": map[string]interface{}{"type": "array", "description": describeProjection(defaultHistoryAttrs), "items": map[string]interface{}{"type": "string"}},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return, newest first (default 200, max 2000)."},
+						"limit": map[string]interface{}{"type": "integer", "description": fmt.Sprintf(
+							"Max records to return, newest first (default %d, max %d). Past that, narrow the constraint or use aggregate_jobs to count instead.",
+							dbmirror.DefaultLimit, dbmirror.MaxLimit)},
 					},
 				},
 			},
@@ -861,7 +864,8 @@ func (s *Server) toolsFor(ctx context.Context) []Tool {
 					"properties": map[string]interface{}{
 						"as_of":      map[string]interface{}{"type": "string", "description": "The point in time: an RFC3339 timestamp (2026-07-24T00:00:00Z) or a relative duration ago (e.g. '-1h', '-30m')."},
 						"constraint": map[string]interface{}{"type": "string", "description": "ClassAd constraint over job attributes. Empty matches all your jobs."},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Max records to return (default 200, max 2000)."},
+						"limit": map[string]interface{}{"type": "integer", "description": fmt.Sprintf(
+							"Max records to return (default %d, max %d).", dbmirror.DefaultLimit, dbmirror.MaxLimit)},
 					},
 					"required": []string{"as_of"},
 				},
