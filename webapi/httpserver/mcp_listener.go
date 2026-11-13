@@ -23,6 +23,13 @@ const (
 // isMCPSurfacePath reports whether path belongs to the MCP surface.
 func isMCPSurfacePath(path string) bool {
 	switch {
+	case path == mcpPath:
+		// The endpoint itself, which the /mcp/ prefix below does not
+		// cover: it has no trailing slash. Without this case a server
+		// given a listener of its own answered only at the older
+		// /mcp/message, and 404ed the address every client is
+		// configured with.
+		return true
 	case strings.HasPrefix(path, mcpPathPrefix):
 		return true
 	case path == wellKnownAuthServer:

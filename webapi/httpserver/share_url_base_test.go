@@ -16,7 +16,7 @@ import (
 //
 // The cause was not missing configuration. When HTTP_API_BASE_URL is
 // unset the server GUESSES a base URL from FULL_HOSTNAME and the listen
-// port, and shareURLBase preferred that guess over the Host the caller
+// port, and publicBaseURLFor preferred that guess over the Host the caller
 // actually reached the server at -- the one value that is right by
 // construction.
 func TestShareURLBasePrefersRequestHostOverGuess(t *testing.T) {
@@ -29,9 +29,9 @@ func TestShareURLBasePrefersRequestHostOverGuess(t *testing.T) {
 	r.Host = "ap40-api.osgdev.chtc.io"
 	r.Header.Set("X-Forwarded-Proto", "https")
 
-	got := h.shareURLBase(r)
+	got := h.publicBaseURLFor(r)
 	if want := "https://ap40-api.osgdev.chtc.io"; got != want {
-		t.Errorf("shareURLBase() = %q, want %q", got, want)
+		t.Errorf("publicBaseURLFor() = %q, want %q", got, want)
 	}
 }
 
@@ -44,8 +44,8 @@ func TestShareURLBaseHonorsExplicitConfig(t *testing.T) {
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/x", nil)
 	r.Host = "some-other-name.internal:8080"
 
-	if got, want := h.shareURLBase(r), "https://canonical.example.org"; got != want {
-		t.Errorf("shareURLBase() = %q, want %q", got, want)
+	if got, want := h.publicBaseURLFor(r), "https://canonical.example.org"; got != want {
+		t.Errorf("publicBaseURLFor() = %q, want %q", got, want)
 	}
 }
 
@@ -59,8 +59,8 @@ func TestShareURLBaseUsesForwardedHost(t *testing.T) {
 	r.Header.Set("X-Forwarded-Host", "ap40-api.osgdev.chtc.io")
 	r.Header.Set("X-Forwarded-Proto", "https")
 
-	if got, want := h.shareURLBase(r), "https://ap40-api.osgdev.chtc.io"; got != want {
-		t.Errorf("shareURLBase() = %q, want %q", got, want)
+	if got, want := h.publicBaseURLFor(r), "https://ap40-api.osgdev.chtc.io"; got != want {
+		t.Errorf("publicBaseURLFor() = %q, want %q", got, want)
 	}
 }
 
@@ -73,7 +73,7 @@ func TestShareURLBaseFallsBackWhenHostMissing(t *testing.T) {
 	r := httptest.NewRequestWithContext(context.Background(), "POST", "/x", nil)
 	r.Host = ""
 
-	if got, want := h.shareURLBase(r), "http://configured:8080"; got != want {
-		t.Errorf("shareURLBase() = %q, want %q", got, want)
+	if got, want := h.publicBaseURLFor(r), "http://configured:8080"; got != want {
+		t.Errorf("publicBaseURLFor() = %q, want %q", got, want)
 	}
 }

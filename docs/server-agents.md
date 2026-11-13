@@ -22,6 +22,28 @@ Who may drive the access point through MCP is
 `HTTP_API_MCP_WRITE_GROUP`; see
 [Authorization groups](server-auth.md#authorization-groups).
 
+## What to hand a user
+
+One address: `https://<your-api-host>/mcp`. That is what goes in a
+client's configuration, and it is the only thing a user needs.
+
+A trailing slash is fine: `/mcp/` redirects to `/mcp`, keeping the
+method, so a client configured that way works too.
+
+It looks like a link, so people follow it in a browser. A browser gets a
+setup page: the address to copy, and the steps for Claude Code, Claude's
+custom connectors, VS Code, Cursor and Codex. `/mcp/setup` serves the
+same page at a URL of its own, for putting in a message or a wiki.
+
+Only a request that asks for HTML gets the page. An MCP client's own
+`GET` of `/mcp` — the server-to-client stream of the streamable HTTP
+transport — and anything sending `Accept: */*`, `curl` included, get the
+protocol's responses as before.
+
+The page names this server and the address to connect to, and says
+nothing about who may connect or which tools are on offer. There is no
+setting for it.
+
 ## MCP is not a sandbox
 
 Enabling MCP hands an agent the access point with the privileges of
