@@ -271,3 +271,48 @@ func TestOnExitOrEvictPromotesDefaultToYes(t *testing.T) {
 		t.Errorf("ShouldTransferFiles = %q (ok=%v), want YES", got, ok)
 	}
 }
+
+// The same hazard as TestRequestDiskDefaultMustEvaluate, one attribute
+// over, and this is the one that bit: an access point whose
+// JOB_DEFAULT_REQUESTMEMORY reads ImageSize -- which condor_submit
+// stamps from the executable it can stat, and this engine often cannot
+// -- left a DAG manager idle for forty minutes with NumJobStarts 0.
+// Nothing refuses an undefined request: it becomes
+// (TARGET.Memory >= RequestMemory) in Requirements, which is undefined
+// too, and a scheduler-universe job with undefined Requirements is
+// never started at all.
+func TestRequestMemoryDefaultMustEvaluate(t *testing.T) {
+	// Verbatim from a CHTC access point.
+	const chtc = "63 + ifthenelse(MemoryUsage =!= undefined, MemoryUsage, (ImageSize + 1023) / 1024)"
+	params := SubmitParamMap{"JOB_DEFAULT_REQUESTMEMORY": chtc}
+
+	// No ImageSize in the ad: undefined, so the built-in replaces it.
+	ad := defaultsJobAd(t, defaultsVanilla, params)
+	if v := ad.EvaluateAttr("RequestMemory"); !v.IsNumber() {
+		t.Fatalf("RequestMemory = %v, want a number the job can be matched on", v)
+	}
+	wantInt(t, ad, "RequestMemory", 128)
+
+	// With ImageSize present the site's own expression is kept, because
+	// it now says something true about this job.
+	ad = defaultsJobAd(t, "+ImageSize = 2048\n"+defaultsVanilla, params)
+	wantInt(t, ad, "RequestMemory", 63+(2048+1023)/1024)
+	mem, _ := ad.Lookup("RequestMemory")
+	if !strings.Contains(mem.String(), "ImageSize") {
+		t.Errorf("RequestMemory = %s, want the site's expression kept", mem)
+	}
+
+	// A +RequestMemory replaces the default outright and is not checked:
+	// that is the submitter's expression, and condor_submit stores one
+	// unchecked too.
+	ad = defaultsJobAd(t, "+RequestMemory = Undefined\n"+defaultsVanilla, params)
+	if v := ad.EvaluateAttr("RequestMemory"); !v.IsUndefined() {
+		t.Errorf("RequestMemory = %v, want the custom attribute's undefined left alone", v)
+	}
+
+	// ...and neither is a request_memory the submit file wrote.
+	ad = defaultsJobAd(t, "request_memory = ImageSize\n"+defaultsVanilla, params)
+	if v := ad.EvaluateAttr("RequestMemory"); !v.IsUndefined() {
+		t.Errorf("RequestMemory = %v, want the submitter's own expression left alone", v)
+	}
+}

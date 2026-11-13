@@ -144,6 +144,56 @@ func isUndefinedRequest(v string) bool {
 	return strings.EqualFold(strings.TrimSpace(v), "undefined")
 }
 
+// defaultMemoryEvaluates keeps a RequestMemory that came from
+// JOB_DEFAULT_REQUESTMEMORY from leaving the job unable to run.
+//
+// Exactly the hazard defaultDiskEvaluates guards, one attribute over,
+// and it was found the hard way: a DAG manager submitted through this
+// server to an access point whose default is
+//
+//	63 + ifthenelse(MemoryUsage =!= undefined, MemoryUsage, (ImageSize + 1023) / 1024)
+//
+// sat idle for forty minutes and was never started. condor_submit
+// stamps ImageSize from the executable it can stat on the submit host;
+// this engine often cannot -- a scheduler-universe job naming
+// /usr/bin/condor_dagman with transfer_executable = false is the
+// ordinary case -- so ImageSize is absent, the arithmetic is undefined,
+// and RequestMemory with it.
+//
+// An undefined request is not refused anywhere. It is appended to
+// Requirements as (TARGET.Memory >= RequestMemory), which is then
+// undefined too, and a job whose Requirements is undefined matches no
+// slot -- and a SCHEDULER-universe job, which matches no slot by
+// nature, is simply never started. No hold, no event, no log line:
+// NumJobStarts stays 0 and the queue says Idle for ever. The same
+// access point runs the same workflow submitted by condor_submit_dag,
+// because that path stamps ImageSize.
+//
+// So when the configured default does not evaluate to a number against
+// the finished ad, HTCondor's built-in replaces it. A request_memory
+// the user wrote is never second-guessed: that is their expression,
+// and condor_submit stores it unchecked too.
+func (sf *SubmitFile) defaultMemoryEvaluates(ad *classad.ClassAd) error {
+	if sf.defaultMemory == "" {
+		return nil
+	}
+	expr, ok := ad.Lookup("RequestMemory")
+	if !ok || expr.String() != sf.defaultMemory {
+		// A custom attribute (+RequestMemory) replaced the default
+		// after it was set; that is the submit file's value now.
+		return nil
+	}
+	if ad.EvaluateAttr("RequestMemory").IsNumber() {
+		return nil
+	}
+	builtin, ok := sf.cfg.DefaultValue("JOB_DEFAULT_REQUESTMEMORY")
+	if !ok {
+		return fmt.Errorf("RequestMemory: the configured default %q does not evaluate to a number "+
+			"for this job, and there is no built-in default to use instead", sf.defaultMemory)
+	}
+	return setSizeAttr(ad, "RequestMemory", builtin, unitMiB)
+}
+
 // defaultDiskEvaluates keeps a RequestDisk that came from
 // JOB_DEFAULT_REQUESTDISK from leaving the job unable to match.
 //
