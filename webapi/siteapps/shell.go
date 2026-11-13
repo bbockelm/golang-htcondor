@@ -1,6 +1,7 @@
 package siteapps
 
 import (
+	_ "embed"
 	"net/http"
 	"strings"
 	"time"
@@ -13,8 +14,13 @@ const shellPath = "/site/_shell.js"
 // shellMeta lets an app decline the overlay.
 //
 // An app with its own fixed header may not survive a bar being put
-// above it. Declining costs that app the switcher, which is why the
-// switcher at /site/ is always a link away and always correct.
+// above it. Declining costs that app the switcher and the way back,
+// which is why the switcher at /site/ is always a link away and always
+// correct.
+//
+// The script carries this selector too; they are kept in step by
+// TestShellHonoursTheDeclineMeta rather than by concatenation, so the
+// overlay stays a file a browser and a linter can read.
 const shellMeta = `name="htcondor-shell"`
 
 // serveShell hands out the overlay script.
@@ -46,97 +52,19 @@ func (h *Handler) serveShell(w http.ResponseWriter, r *http.Request) {
 // does not appear to change on every restart.
 var shellModTime = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// shellJS is the overlay: an app switcher and the expert-mode door,
-// rendered into a shadow root.
+// shellJS is the overlay: where you are, the caller's other apps, and
+// the way back to the full console, rendered into a shadow root.
 //
-// Shadow DOM is the whole reason this is tolerable. The bar lives
-// inside a page somebody else wrote, with CSS we have never seen; a
-// shadow root means their styles cannot reach in and ours cannot leak
-// out, so we are not negotiating specificity with a stranger's build.
+// A file rather than a Go string literal: it is JavaScript, and a
+// stylesheet, and it is tested in a browser-like environment by
+// webapi/frontend/src/lib/siteAppShell.test.ts, all of which want real
+// source rather than a quoted blob. It is embedded so the binary still
+// carries everything it serves.
 //
-// It renders NOTHING unless there is somewhere to go: one app and no
-// expert door is the common case, and a bar that only says where you
-// already are is clutter.
-const shellJS = `(function () {
-  "use strict";
-  if (window.__HTCONDOR_SHELL__) return;
-  window.__HTCONDOR_SHELL__ = true;
-  // The bar's height, in one place: the CSS, the custom property the
-  // page reads, and the clearance calculation all have to agree, and
-  // three literals drift.
-  var H = 36;
-
-  var meta = document.querySelector('meta[` + shellMeta + `]');
-  if (meta && meta.content === "none") return;
-
-  function h(tag, props, kids) {
-    var el = document.createElement(tag);
-    for (var k in props) if (props[k] != null) el.setAttribute(k, props[k]);
-    (kids || []).forEach(function (c) {
-      el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-    });
-    return el;
-  }
-
-  fetch("/api/v1/auth/me", { credentials: "include" })
-    .then(function (r) { return r.ok ? r.json() : null; })
-    .then(function (me) {
-      if (!me || !me.authenticated) return;
-      var apps = me.site_apps || [];
-      var here = (window.__HTCONDOR_APP__ || {}).id;
-      var others = apps.filter(function (a) { return a.id !== here; });
-      var canLeave = !!me.app_only;
-      // Nowhere to go: no bar. A strip that only names the page you
-      // are on is noise in somebody else's interface.
-      if (others.length === 0 && !canLeave) return;
-
-      var host = document.createElement("div");
-      host.setAttribute("data-htcondor-shell", "");
-      var root = host.attachShadow({ mode: "open" });
-
-      var style = document.createElement("style");
-      style.textContent =
-        ":host{all:initial}" +
-        ".bar{position:fixed;top:0;left:0;right:0;height:" + H + "px;z-index:2147483000;" +
-        "display:flex;align-items:center;gap:.75rem;padding:0 .75rem;box-sizing:border-box;" +
-        "font:13px/1.4 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
-        "background:#15181c;color:#e6e9ec;border-bottom:1px solid #2b3137}" +
-        ".name{font-weight:600;margin-right:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
-        "a{color:#9aa4af;text-decoration:none;padding:.2rem .5rem;border-radius:4px;white-space:nowrap}" +
-        "a:hover,a:focus{background:rgba(255,255,255,.1);color:#fff;outline:none}";
-      root.appendChild(style);
-
-      var bar = h("div", { class: "bar", role: "navigation", "aria-label": "HTCondor apps" }, [
-        h("span", { class: "name" }, [(window.__HTCONDOR_APP__ || {}).name || "Apps"]),
-      ]);
-      others.slice(0, 4).forEach(function (a) {
-        bar.appendChild(h("a", { href: a.url }, [a.name]));
-      });
-      if (others.length > 4) bar.appendChild(h("a", { href: "/site/" }, ["All apps"]));
-      if (canLeave) bar.appendChild(h("a", { href: "/site/expert" }, ["Expert mode"]));
-      root.appendChild(bar);
-
-      document.body.appendChild(host);
-      // Tell the page how much room the bar took, and nudge it clear.
-      // An app that cares reads the variable; one that does not still
-      // gets that much of its first screen back.
-      var de = document.documentElement;
-      de.style.setProperty("--htcondor-shell-height", H + "px");
-      de.style.setProperty("scroll-padding-top", H + "px");
-      // Ensure at least the bar's height of clearance, measured from
-      // the COMPUTED padding rather than the inline one.
-      //
-      // The first version checked document.body.style.paddingTop,
-      // which is only the inline value, and got both directions
-      // wrong: an app with an inline padding of its own was skipped
-      // entirely and left with less clearance than the bar needs,
-      // while an app whose stylesheet set a generous padding had it
-      // overridden down to the bar's height. Reading the computed
-      // value fixes both -- a page that already clears the bar is
-      // left alone.
-      var pad = parseFloat(getComputedStyle(document.body).paddingTop) || 0;
-      if (pad < H) document.body.style.paddingTop = H + "px";
-    })
-    .catch(function () { /* no bar is better than a broken page */ });
-})();
-`
+// It renders for every authenticated viewer. The previous version drew
+// nothing unless there were other apps to list or an expert door to
+// offer, which stranded the commonest case there is: one published app
+// and a user who has the whole console, with no link back to it.
+//
+//go:embed shell.js
+var shellJS string

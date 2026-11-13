@@ -124,6 +124,23 @@ test.describe('the shell overlay', () => {
     expect(links!.some((l) => l.href === APP_URL)).toBe(false);
   });
 
+  // The admin this suite signs in as is not app-only: they have the
+  // whole console, and before this they got no way back to it from an
+  // app -- the bar rendered only when there were other apps or an
+  // expert door.
+  test('offers the way back to the full console', async ({ page }) => {
+    await page.goto(APP_URL);
+    await page.waitForFunction(
+      () => !!document.querySelector('[data-htcondor-shell]')?.shadowRoot,
+      undefined,
+      { timeout: 15_000 },
+    );
+
+    const back = (await barLinks(page))!.find((l) => l.href === '/');
+    expect(back).toBeTruthy();
+    expect(back!.text).toBe('Full console');
+  });
+
   test('the page cannot restyle the bar', async ({ page }) => {
     await page.goto(APP_URL);
     await page.waitForFunction(
