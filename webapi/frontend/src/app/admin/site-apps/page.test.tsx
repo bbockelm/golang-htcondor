@@ -263,7 +263,11 @@ describe('site apps admin page', () => {
     renderPage();
     const form = await screen.findByTestId('upload-form');
 
-    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'cryoem' } });
+    // A NEW id: the form refuses one that is already published before
+    // it sends anything, so an id already in the table would never
+    // reach the server and this would be testing the wrong refusal.
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'seqqc' } });
     fireEvent.change(screen.getByTestId('upload-groups'), { target: { value: 'smith_lab' } });
     fireEvent.submit(form);
 
@@ -526,7 +530,8 @@ describe('the publish form', () => {
     uploadSiteApp.mockResolvedValue(listing({ upload_allowed: true }));
     renderPage();
     const form = await screen.findByTestId('upload-form');
-    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'cryoem' } });
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'seqqc' } });
 
     const groups = screen.getByTestId('upload-groups');
     fireEvent.change(groups, { target: { value: 'smith_lab' } });
@@ -549,7 +554,8 @@ describe('the publish form', () => {
     uploadSiteApp.mockResolvedValue(listing({ upload_allowed: true }));
     renderPage();
     const form = await screen.findByTestId('upload-form');
-    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'cryoem' } });
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'seqqc' } });
     fireEvent.click(screen.getByTestId('upload-everyone'));
     // The group box is gone: "everyone" and "these groups" are one
     // decision, and a form offering both invites a list nobody reads.
@@ -593,15 +599,17 @@ describe('the publish form', () => {
     // Re-publishing an app that is already in the table changes
     // nothing else visible about the row, so without this the page
     // looks like it did nothing.
-    listSiteApps.mockResolvedValue(listing({ upload_allowed: true }));
+    // An app this server published, so it is one the form offers to
+    // replace -- which is what "re-publishing" means, and is now the
+    // mode the form opens in rather than an id that has to be typed
+    // exactly right.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, apps: [app({ managed: true })] }));
     let release: (v: AdminSiteApps) => void = () => {};
     uploadSiteApp.mockImplementation(
       () => new Promise<AdminSiteApps>((resolve) => (release = resolve)),
     );
     renderPage();
     const form = await screen.findByTestId('upload-form');
-    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'cryoem' } });
-    fireEvent.change(screen.getByTestId('upload-groups'), { target: { value: 'smith_lab' } });
     fireEvent.submit(form);
 
     const button = await screen.findByTestId('upload-submit');
@@ -626,6 +634,135 @@ describe('the publish form', () => {
     expect(result).toHaveTextContent('2.2.0');
     expect(result).toHaveTextContent('cryoem');
     expect(button).not.toBeDisabled();
+  });
+
+  // --- New app, or a new bundle for one that exists ----------------
+  //
+  // Reported: an administrator meaning to replace `demos` typed
+  // `demo`, and got a second app. Nothing was wrong with the upload --
+  // `demo` is a valid id -- so nothing complained, and two apps sat
+  // side by side. The form had made the two acts the same act: an id
+  // that matched replaced, an id that did not create.
+
+  const two = () =>
+    listing({
+      upload_allowed: true,
+      apps: [
+        // url spelled out: app() defaults it to /site/cryoem/ whatever
+        // id it is given, and a row that disagrees with its own id
+        // would make this fixture lie about which app is selected.
+        app({
+          id: 'demos',
+          url: '/site/demos/',
+          managed: true,
+          groups: ['smith_lab'],
+          home: true,
+        }),
+        app({ id: 'cryoem', url: '/site/cryoem/', managed: true, groups: ['jones_lab'] }),
+      ],
+    });
+
+  it('opens on replacing an app, and names the one it would replace', async () => {
+    listSiteApps.mockResolvedValue(two());
+    renderPage();
+    await screen.findByTestId('upload-form');
+
+    expect(screen.getByTestId('mode-update')).toBeChecked();
+    // Chosen from a list, so the id cannot be mistyped at all.
+    expect(screen.queryByTestId('upload-id')).toBeNull();
+    expect(screen.getByTestId('upload-target')).toHaveValue('demos');
+    expect(screen.getByTestId('upload-replacing')).toHaveTextContent('/site/demos/');
+  });
+
+  it('replaces the app that was chosen, not one that was typed', async () => {
+    listSiteApps.mockResolvedValue(two());
+    uploadSiteApp.mockResolvedValue(two());
+    renderPage();
+    const form = await screen.findByTestId('upload-form');
+    fireEvent.change(screen.getByTestId('upload-target'), { target: { value: 'cryoem' } });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
+    expect((uploadSiteApp.mock.calls[0][0] as FormData).get('id')).toBe('cryoem');
+  });
+
+  it('carries the app’s own audience into the update, rather than clearing it', async () => {
+    // Replacing a bundle is not a decision about who may see the app.
+    // An update that published whatever an empty form held would be a
+    // visibility change nobody asked for -- and the quiet kind.
+    listSiteApps.mockResolvedValue(two());
+    uploadSiteApp.mockResolvedValue(two());
+    renderPage();
+    const form = await screen.findByTestId('upload-form');
+    expect(await screen.findByTestId('group-pill-smith_lab')).toBeInTheDocument();
+    expect(screen.getByTestId('upload-home')).toBeChecked();
+
+    fireEvent.change(screen.getByTestId('upload-target'), { target: { value: 'cryoem' } });
+    await waitFor(() => expect(screen.getByTestId('group-pill-jones_lab')).toBeInTheDocument());
+    expect(screen.queryByTestId('group-pill-smith_lab')).toBeNull();
+    expect(screen.getByTestId('upload-home')).not.toBeChecked();
+
+    fireEvent.submit(form);
+    await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
+    const sent = uploadSiteApp.mock.calls[0][0] as FormData;
+    expect(sent.get('groups')).toBe('jones_lab');
+    expect(sent.get('home')).toBe('false');
+  });
+
+  it('refuses to publish a new app under an id that is already taken', async () => {
+    // The other half of the same mistake: overwriting by typing a name
+    // that happens to match. That is an update, and an update says so.
+    listSiteApps.mockResolvedValue(two());
+    renderPage();
+    const form = await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'cryoem' } });
+    fireEvent.change(screen.getByTestId('upload-groups'), { target: { value: 'smith_lab' } });
+    fireEvent.submit(form);
+
+    expect(await screen.findByTestId('upload-id-error')).toHaveTextContent('already published');
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('asks about a new id that is one letter from an existing one', async () => {
+    // The reported typo exactly: `demo` for `demos`. A question, not a
+    // refusal -- both may be real apps -- and it arrives while the id
+    // is being typed, before the bundle goes up.
+    listSiteApps.mockResolvedValue(two());
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'demo' } });
+
+    const note = await screen.findByTestId('upload-near-miss');
+    expect(note).toHaveTextContent('demos');
+
+    // And it is one click to do what was meant.
+    fireEvent.click(screen.getByTestId('upload-near-miss-switch'));
+    await waitFor(() => expect(screen.getByTestId('upload-target')).toHaveValue('demos'));
+    expect(screen.getByTestId('mode-update')).toBeChecked();
+  });
+
+  it('keeps quiet about ids that are merely short', async () => {
+    // A warning on every unfamiliar name is a warning nobody reads.
+    listSiteApps.mockResolvedValue(two());
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('mode-new'));
+    fireEvent.change(screen.getByTestId('upload-id'), { target: { value: 'atlas' } });
+    await waitFor(() => expect(screen.queryByTestId('upload-near-miss')).toBeNull());
+  });
+
+  it('offers nothing to replace when the configuration published everything', async () => {
+    // A config-published app is read-only here: the server refuses to
+    // overwrite it, so offering it would be offering an act that
+    // cannot happen.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, apps: [app()] }));
+    renderPage();
+    await screen.findByTestId('upload-form');
+    expect(screen.getByTestId('mode-new')).toBeChecked();
+    expect(screen.getByTestId('mode-update')).toBeDisabled();
+    expect(screen.getByTestId('nothing-to-update')).toBeInTheDocument();
   });
 
   it('says when a published version went up, in the row', async () => {

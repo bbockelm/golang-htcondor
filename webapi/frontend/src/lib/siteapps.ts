@@ -49,3 +49,60 @@ export function parseGroupList(raw: string): string[] {
     .map((g) => g.trim())
     .filter((g) => g !== '');
 }
+
+// nearestSiteAppID answers the question behind a reported mistake: an
+// administrator meaning to replace `demos` typed `demo`, and got a
+// second app rather than a new version of the first one. Nothing was
+// wrong with the upload -- `demo` is a perfectly good id -- so nothing
+// complained, and the two apps sat side by side.
+//
+// Publishing a new app and replacing an existing one are different
+// acts, and the form now asks which one is meant. This is the second
+// line: if a NEW id is one or two characters away from one already
+// published, say so before the bundle goes up.
+//
+// Returns the closest existing id, or null when nothing is close.
+// Deliberately NOT a refusal: `demo` and `demos` may both be real.
+export function nearestSiteAppID(typed: string, existing: readonly string[]): string | null {
+  const id = typed.trim().toLowerCase();
+  if (!id) return null;
+  let best: string | null = null;
+  let bestD = Infinity;
+  for (const other of existing) {
+    const o = other.toLowerCase();
+    // An exact match is a collision, not a near miss. The caller has
+    // to refuse that outright, and saying "did you mean X" about X
+    // itself would be nonsense.
+    if (o === id) return null;
+    const d = editDistance(id, o);
+    // Two edits, and never more than half the shorter name: at that
+    // rate `cms` and `atlas` would be neighbours.
+    if (d > 2 || d * 2 > Math.min(id.length, o.length)) continue;
+    // Ties resolve by name so the answer does not depend on the order
+    // the server happened to list the apps in.
+    if (d < bestD || (d === bestD && best !== null && other < best)) {
+      best = other;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+/** Levenshtein distance, two rows at a time. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length || !b.length) return a.length || b.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j] + 1,
+        row[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
