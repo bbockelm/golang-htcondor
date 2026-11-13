@@ -70,6 +70,11 @@ type SubmitFile struct {
 	// params answers the configuration knobs condor_submit reads with
 	// param(); nil means HTCondor's built-in defaults. See SubmitParams.
 	params SubmitParams
+	// defaultMemory is the RequestMemory expression the job ad being
+	// built took from JOB_DEFAULT_REQUESTMEMORY, if it took one. Reset
+	// by every setResourceRequests; see defaultMemoryEvaluates.
+	defaultMemory string
+
 	// defaultDisk is the RequestDisk expression the job ad being built
 	// took from JOB_DEFAULT_REQUESTDISK, or "" when it took none. Reset
 	// by every setResourceRequests; see defaultDiskEvaluates.
@@ -814,6 +819,9 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 	// After the custom attributes, which can supply what a configured
 	// RequestDisk default reads (or replace it outright).
 	if err := sf.defaultDiskEvaluates(ad); err != nil {
+		return nil, err
+	}
+	if err := sf.defaultMemoryEvaluates(ad); err != nil {
 		return nil, err
 	}
 
@@ -2094,6 +2102,7 @@ func canonicalConcurrencyLimits(value string) string {
 // retry_request_memory family is read; see setRequestMemory.
 func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 	sf.defaultDisk = ""
+	sf.defaultMemory = ""
 
 	// CPUs: a count, so no units -- but it may be an expression, which
 	// condor_submit stores unevaluated. A parallel-universe job that
@@ -2159,6 +2168,9 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 		// default nor the retry commands.
 		if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
 			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
+		}
+		if e, ok := ad.Lookup("RequestMemory"); ok {
+			sf.defaultMemory = e.String()
 		}
 	}
 
