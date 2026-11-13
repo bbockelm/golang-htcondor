@@ -213,9 +213,15 @@ export const sessionFixture: Session = {
   is_admin: true,
 };
 
-// Site apps, for the admin page. One app the configuration publishes
-// -- which is the read-only half of that page, and the half a frozen
-// fixture can state honestly.
+// Site apps, for the admin page. Two of them, because the page now
+// treats them differently: one the configuration publishes, which is
+// read-only here, and one that was uploaded, which is the only kind
+// the publish form offers to replace.
+//
+// A fixture with only the config-published app could never show the
+// form's default state -- it would always open on "publish a new
+// app", which is the state that let a site create `demo` beside the
+// `demos` it meant to update.
 export const siteAppsFixture: AdminSiteApps = {
   enabled: true,
   upload_allowed: true,
@@ -233,6 +239,21 @@ export const siteAppsFixture: AdminSiteApps = {
       origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
       managed: false,
       url: '/site/cryoem/',
+    },
+    {
+      id: 'seq-qc',
+      name: 'Sequence QC',
+      groups: ['jones_lab'],
+      home: false,
+      attested: true,
+      digest: 'bb7711ee44220000ffee1122',
+      version: '1.4.0',
+      size_bytes: 980_000,
+      origin: 'upload',
+      managed: true,
+      url: '/site/seq-qc/',
+      uploaded_at: '2026-11-10T14:05:00Z',
+      uploaded_by: 'alice',
     },
   ],
 };

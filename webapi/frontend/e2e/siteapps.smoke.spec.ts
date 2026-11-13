@@ -63,6 +63,9 @@ test('an app row opens onto its settings and its history', async ({ page }) => {
 test('who may see an app is a checkbox and pills, not a typed list', async ({ page }) => {
   await page.goto('/admin/site-apps');
 
+  // A NEW app: the form opens on replacing one, because that is the
+  // commoner act and the one that must not be mistyped.
+  await page.getByTestId('mode-new').check();
   const groups = page.getByTestId('upload-groups');
   await groups.fill('smith_lab');
   await groups.press('Enter');
@@ -84,7 +87,36 @@ test('the form refuses an id the server would refuse', async ({ page }) => {
   // Leaving the field is enough: the bundle input is required, so a
   // browser refuses the submit before the form's own checks run, and
   // an id error that only fired on submit would never be seen.
+  await page.getByTestId('mode-new').check();
   await page.getByTestId('upload-id').fill('CryoEM');
   await page.getByTestId('upload-id').blur();
   await expect(page.getByTestId('upload-id-error')).toContainText('lowercase');
+});
+
+test('replacing an app is chosen from a list, not typed', async ({ page }) => {
+  // Reported: meaning to replace `demos`, an administrator typed
+  // `demo` and got a second app. Both ids are valid, so nothing
+  // refused it and nothing said anything.
+  await page.goto('/admin/site-apps');
+
+  // The form opens on replacing, with the app named and its own
+  // audience already in the box -- replacing a bundle is not a
+  // decision about who may see it.
+  await expect(page.getByTestId('mode-update')).toBeChecked();
+  await expect(page.getByTestId('upload-target')).toHaveValue('seq-qc');
+  await expect(page.getByTestId('upload-replacing')).toContainText('/site/seq-qc/');
+  await expect(page.getByTestId('group-pill-jones_lab')).toBeVisible();
+  // No id field at all in this mode, so there is nothing to mistype.
+  await expect(page.getByTestId('upload-id')).toHaveCount(0);
+  await expect(page.getByTestId('upload-submit')).toContainText('Replace bundle');
+
+  // And a new app whose id is nearly one that exists is questioned
+  // before the bundle goes up -- a question, not a refusal, with the
+  // intended act one click away.
+  await page.getByTestId('mode-new').check();
+  await page.getByTestId('upload-id').fill('seq-qa');
+  await expect(page.getByTestId('upload-near-miss')).toContainText('seq-qc');
+  await page.getByTestId('upload-near-miss-switch').click();
+  await expect(page.getByTestId('mode-update')).toBeChecked();
+  await expect(page.getByTestId('upload-target')).toHaveValue('seq-qc');
 });

@@ -38,7 +38,12 @@ import {
   type AdminSiteAppSetting,
 } from '@/lib/api';
 import { ConfirmButton } from '@/components/ConfirmButton';
-import { EVERYONE, parseGroupList, validateSiteAppID } from '@/lib/siteapps';
+import {
+  EVERYONE,
+  nearestSiteAppID,
+  parseGroupList,
+  validateSiteAppID,
+} from '@/lib/siteapps';
 
 const TH = 'px-3 py-2';
 const TD = 'px-3 py-2 align-top';
@@ -479,15 +484,71 @@ function GroupsField({
 // anything happened.
 type Published = { id: string; version?: string; at?: string };
 
-function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
+function UploadForm({
+  apps,
+  onDone,
+}: {
+  apps: AdminSiteApp[];
+  onDone: (d: AdminSiteApps) => void;
+}) {
+  // The apps this server may replace. One the configuration publishes
+  // is not among them: the server refuses to overwrite it, so offering
+  // it here would be offering an action that cannot happen.
+  const updatable = apps.filter((a) => a.managed);
+
   const [error, setError] = useState<string | null>(null);
+  // Publishing something new and replacing something that exists are
+  // different acts, and the form used to make them the same one: an id
+  // that matched replaced, an id that did not create. A site meaning
+  // to update `demos` typed `demo` and got a second app, with nothing
+  // to say so -- `demo` was a valid id for a new app, which is exactly
+  // what the form made.
+  const [mode, setMode] = useState<'update' | 'new'>(
+    updatable.length > 0 ? 'update' : 'new',
+  );
   const [id, setID] = useState('');
+  const [target, setTarget] = useState(updatable[0]?.id ?? '');
   const [idError, setIDError] = useState<string | null>(null);
   const [everyone, setEveryone] = useState(false);
   const [groups, setGroups] = useState<string[]>([]);
   const [pending, setPending] = useState('');
   const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [home, setHome] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
+
+  const chosen = mode === 'update' ? updatable.find((a) => a.id === target) : undefined;
+  const effectiveID = mode === 'update' ? target : id;
+  // Only ever a question, never a refusal: `demo` and `demos` can
+  // both be real apps. It is shown while the id is being typed, which
+  // is before the bundle is uploaded.
+  const near = mode === 'new' ? nearestSiteAppID(id, apps.map((a) => a.id)) : null;
+
+  /**
+   * Take an existing app's audience as the starting point.
+   *
+   * Replacing a bundle is not a decision about who may see the app,
+   * and an update that silently re-published to whatever was in an
+   * empty form would be a visibility change nobody asked for.
+   */
+  function loadFrom(app: AdminSiteApp | undefined) {
+    setEveryone(app?.groups.includes(EVERYONE) ?? false);
+    setGroups((app?.groups ?? []).filter((g) => g !== EVERYONE));
+    setHome(app?.home ?? false);
+    setPending('');
+    setGroupsError(null);
+    setError(null);
+    setDone(null);
+  }
+
+  // The settings of whichever app is selected, including on the first
+  // render: the form opens in update mode wherever there is something
+  // to update, and an empty audience box would read as "visible to
+  // nobody" for an app that is visible to a lab.
+  const [loaded, setLoaded] = useState<string | null>(null);
+  if (mode === 'update' && loaded !== target) {
+    setLoaded(target);
+    loadFrom(chosen);
+  }
 
   const upload = useMutation({
     mutationFn: (form: FormData) => api.admin.uploadSiteApp(form),
@@ -515,7 +576,19 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
         // have to press Enter to mean what they have just typed.
         const named = pending.trim() === '' ? groups : [...groups, ...parseGroupList(pending)];
 
-        const idProblem = validateSiteAppID(id);
+        const idProblem =
+          mode === 'update'
+            ? target === ''
+              ? 'Choose the app to replace.'
+              : null
+            : // A new app may not take an id that is already published.
+              // Overwriting one by typing its name is the other half
+              // of the mistake this form now refuses: it is an update,
+              // and an update says so.
+              (validateSiteAppID(id) ??
+              (apps.some((a) => a.id === id.trim().toLowerCase())
+                ? `${id.trim()} is already published. Choose “Replace an app” to put a new bundle under that id.`
+                : null));
         const groupProblem =
           everyone || named.length > 0
             ? null
@@ -528,8 +601,12 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
         setPending('');
         setDone(null);
         const data = new FormData(form);
-        data.set('id', id.trim());
+        data.set('id', effectiveID.trim());
         data.set('groups', everyone ? EVERYONE : named.join(', '));
+        // Controlled now, because an update loads the app's current
+        // setting into it; an unchecked box in the DOM would quietly
+        // clear it.
+        data.set('home', home ? 'true' : 'false');
         upload.mutate(data);
       }}
     >
@@ -540,30 +617,129 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
           with the rights of everyone who opens it, in code this release does not review.
         </p>
       </div>
-      <label className="block text-sm text-gray-700">
-        Id
-        <input
-          name="id"
-          className={INPUT}
-          data-testid="upload-id"
-          value={id}
-          onChange={(e) => {
-            setID(e.target.value);
-            setIDError(null);
-          }}
-          // Checked on the way out of the field as well as on submit.
-          // The bundle input is required, so a browser refuses the
-          // submit before any of this runs -- an administrator who
-          // typed a bad id would otherwise be told about the missing
-          // file and nothing else.
-          onBlur={() => {
-            if (id.trim() !== '') setIDError(validateSiteAppID(id));
-          }}
-        />
-      </label>
+
+      {/* Which act this is. Asked first, because it decides whether an
+          id is typed or chosen -- and typing one is how a site ended
+          up with `demo` beside the `demos` it meant to replace. */}
+      <fieldset className="text-sm text-gray-700">
+        <legend className="sr-only">New app or replacement</legend>
+        <div className="flex gap-4">
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="mode"
+              value="update"
+              checked={mode === 'update'}
+              disabled={updatable.length === 0}
+              data-testid="mode-update"
+              onChange={() => {
+                setMode('update');
+                setIDError(null);
+                setLoaded(null);
+              }}
+            />
+            Replace an app
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="mode"
+              value="new"
+              checked={mode === 'new'}
+              data-testid="mode-new"
+              onChange={() => {
+                setMode('new');
+                setIDError(null);
+                loadFrom(undefined);
+              }}
+            />
+            Publish a new app
+          </label>
+        </div>
+        {updatable.length === 0 ? (
+          <p className="mt-1 text-xs text-gray-500" data-testid="nothing-to-update">
+            Nothing published here can be replaced from this page yet.
+          </p>
+        ) : null}
+      </fieldset>
+
+      {mode === 'update' ? (
+        <label className="block text-sm text-gray-700">
+          App
+          <select
+            className={INPUT}
+            data-testid="upload-target"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+          >
+            {updatable.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.id}
+                {a.version ? ` — ${a.version}` : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <label className="block text-sm text-gray-700">
+          Id
+          <input
+            name="id"
+            className={INPUT}
+            data-testid="upload-id"
+            value={id}
+            onChange={(e) => {
+              setID(e.target.value);
+              setIDError(null);
+            }}
+            // Checked on the way out of the field as well as on submit.
+            // The bundle input is required, so a browser refuses the
+            // submit before any of this runs -- an administrator who
+            // typed a bad id would otherwise be told about the missing
+            // file and nothing else.
+            onBlur={() => {
+              if (id.trim() !== '') setIDError(validateSiteAppID(id));
+            }}
+          />
+        </label>
+      )}
       {idError ? (
         <p className="text-sm text-red-600" data-testid="upload-id-error">
           {idError}
+        </p>
+      ) : null}
+      {near && !idError ? (
+        <p
+          className="rounded-sm border border-amber-300 bg-amber-50 px-2 py-1 text-sm text-amber-900"
+          data-testid="upload-near-miss"
+        >
+          <Code>{near}</Code> is already published, and <Code>{id.trim()}</Code> is nearly the
+          same name. Publishing this makes a second app.{' '}
+          <button
+            type="button"
+            className="underline"
+            data-testid="upload-near-miss-switch"
+            onClick={() => {
+              setMode('update');
+              setTarget(near);
+              setLoaded(null);
+              setIDError(null);
+            }}
+          >
+            Replace {near} instead
+          </button>
+        </p>
+      ) : null}
+      {chosen ? (
+        <p className="text-xs text-gray-600" data-testid="upload-replacing">
+          Replaces the bundle served at <Code>{chosen.url}</Code>
+          {chosen.version ? (
+            <>
+              , now at version <strong>{chosen.version}</strong>
+            </>
+          ) : null}
+          . Its settings below are the ones in force; change them here and they change with the
+          bundle.
         </p>
       ) : null}
       <GroupsField
@@ -599,7 +775,8 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
         <input
           name="home"
           type="checkbox"
-          value="true"
+          checked={home}
+          onChange={(e) => setHome(e.target.checked)}
           className="rounded-sm border-gray-300"
           data-testid="upload-home"
         />
@@ -612,7 +789,8 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
       ) : null}
       {upload.isPending ? (
         <p className="text-sm text-gray-600" data-testid="upload-busy">
-          Publishing {id.trim()}… the bundle is being stored and the directory rescanned.
+          Publishing {effectiveID.trim()}… the bundle is being stored and the directory
+          rescanned.
         </p>
       ) : null}
       {done && !upload.isPending ? (
@@ -638,7 +816,11 @@ function UploadForm({ onDone }: { onDone: (d: AdminSiteApps) => void }) {
         className="rounded-sm bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         data-testid="upload-submit"
       >
-        {upload.isPending ? 'Publishing…' : 'Publish'}
+        {upload.isPending
+          ? 'Publishing…'
+          : mode === 'update'
+            ? 'Replace bundle'
+            : 'Publish new app'}
       </button>
     </form>
   );
@@ -750,7 +932,7 @@ export default function AdminSiteAppsPage() {
       )}
 
       {data.upload_allowed ? (
-        <UploadForm onDone={(d) => qc.setQueryData(['admin', 'site-apps'], d)} />
+        <UploadForm apps={data.apps} onDone={(d) => qc.setQueryData(['admin', 'site-apps'], d)} />
       ) : (
         <div
           className="max-w-xl rounded-lg border border-gray-200 bg-gray-50 p-4"
