@@ -447,9 +447,17 @@ instead. The response says which backend answered:
 
 Routing needs no configuration beyond what the API already has (a collector to
 discover the mirror, and the HTCondor config to authenticate to it), and it is
-always best-effort: no mirror, a stale one, a durability gap, a dial or query
-error, or a result larger than the request's limit all fall back to the schedd
-with no visible difference other than `"source": "schedd"`.
+always best-effort: no mirror, a stale one, a durability gap, or a dial or query
+error all fall back to the schedd with no visible difference other than
+`"source": "schedd"`.
+
+A mirror-served response carries at most `HTTP_API_DBMIRROR_MAX_LIMIT` records
+(default 2000), or `HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT` (default 10000) when
+the request names a `projection`, whose rows are far smaller. More matches than
+that is not an error and does not fall back: the response sets `has_more` and
+the rest is fetched a page at a time — with `page_token` on `/api/v1/jobs`, and
+with `before_cluster` / `before_proc` taken from the last record returned on
+`/api/v1/jobs/archive`.
 
 Freshness rules (shared with the MCP tools, in `webapi/dbmirror`):
 

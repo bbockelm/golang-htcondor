@@ -656,13 +656,21 @@ const openAPISchema = `{
       "HistoryListResponse": {
         "type": "object",
         "properties": {
-          "records": {
+          "ads": {
             "type": "array",
             "items": {
               "type": "object",
               "description": "History record ClassAd as a JSON object"
             },
             "description": "Array of history ClassAds (only present in non-streaming mode)"
+          },
+          "total_returned": {
+            "type": "integer",
+            "description": "Number of records in this response; present when an htcondordb mirror answered."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Present when an htcondordb mirror answered: true when further records matched but did not fit this request's limit. Fetch them with before_cluster / before_proc taken from the last record returned."
           },
           "error": {
             "type": "string",
@@ -3737,10 +3745,28 @@ const openAPISchema = `{
           {
             "name": "limit",
             "in": "query",
-            "description": "Maximum number of archived records to return (use * for unlimited)",
+            "description": "Maximum number of archived records to return (use * for unlimited). A response served from an htcondordb mirror is capped per request \u2014 HTTP_API_DBMIRROR_MAX_LIMIT (default 2000) for whole records, HTTP_API_DBMIRROR_MAX_PROJECTED_LIMIT (default 10000) when projection names the attributes wanted. A capped response sets has_more; page through the rest with before_cluster / before_proc.",
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "before_cluster",
+            "in": "query",
+            "description": "Pagination cursor: return only records older than this point in the scan. Set it to the ClusterId of the last record of the previous page, with before_proc.",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "before_proc",
+            "in": "query",
+            "description": "The ProcId companion to before_cluster. Defaults to 0.",
+            "required": false,
+            "schema": {
+              "type": "integer"
             }
           },
           {
