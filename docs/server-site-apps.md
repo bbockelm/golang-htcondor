@@ -154,13 +154,23 @@ GitHub release** and give the repository as `owner/name` -- or paste
 its URL, which is what you have if the repository is open in another
 tab.
 
-The page reads the repository as you type it. It says whether GitHub
-has it, lists the releases it has published to choose from, and names
-the bundle it found in the one you chose, so the only release that can
-be asked for is one that exists. Where a release attaches more than one
+The page reads the repository as you type it. Once the account and a
+slash are down, it offers that account's repositories that match what
+you have written so far -- arrow keys and Enter, or the mouse -- so a
+name can be recognised rather than remembered. It then says whether
+GitHub has the repository, lists the releases it has published to
+choose from, and names the bundle it found in the one you chose, so
+the only release that can be asked for is one that exists. Where a release attaches more than one
 `.zip` -- the one case the access point refuses to guess at -- it asks
 which. Where it attaches none, it says so rather than letting the
 install start.
+
+The suggestions come from one listing of the account, its hundred most
+recently updated repositories, fetched once per account rather than
+once per keystroke. An older repository than that may not be offered,
+and the page says so rather than leaving an empty list to imply the
+name is wrong; typing it in full always works, because the release
+lookup addresses a repository exactly instead of searching for it.
 
 If the browser cannot ask GitHub, which a rate limit or a proxy will
 do, the lists give way to boxes: type a tag, or leave it blank for the

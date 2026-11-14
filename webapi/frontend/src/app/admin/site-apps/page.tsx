@@ -47,13 +47,18 @@ import {
 import {
   latestRelease,
   listReleases,
+  listRepos,
+  ownerOf,
   parseRepoRef,
+  rankRepoMatches,
+  repoTermOf,
   pickBundleAsset,
   releaseDiffers,
   repoSlug,
   type AssetChoice,
   type Release,
   type ReleasesResult,
+  type RepoSummary,
 } from '@/lib/github';
 
 const TH = 'px-3 py-2';
@@ -496,6 +501,104 @@ function describeRelease(r: Release): string {
   return parts.join(' ');
 }
 
+// RepoSuggestions offers the account's repositories that match what
+// has been typed, so that a name can be recognised rather than
+// remembered. Matched against one listing of the account rather than
+// a search per keystroke, which is a budget this cannot afford.
+//
+// It is a suggestion and never a restriction: a name that is not
+// offered may still be right, because the listing is one page of an
+// account that may have more. The release lookup addresses a
+// repository exactly, so typing it in full always works.
+function RepoSuggestions({
+  repos,
+  term,
+  highlight,
+  onPick,
+  onHighlight,
+  truncated,
+}: {
+  repos: RepoSummary[];
+  term: string;
+  highlight: number;
+  onPick: (name: string) => void;
+  onHighlight: (i: number) => void;
+  /** The account had a full page, so there may be more than was seen. */
+  truncated: boolean;
+}) {
+  if (repos.length === 0) {
+    // Nothing offered is not the same as nothing there. An account
+    // with more repositories than one page holds can easily have the
+    // right one outside it, and a silent empty list would read as
+    // this name being wrong.
+    if (!truncated || term === '') return null;
+    return (
+      <p className="-mt-2 text-xs text-gray-500" data-testid="repo-suggestions-truncated">
+        Nothing matching among this account’s 100 most recently updated repositories. Type the
+        name in full if it is an older one.
+      </p>
+    );
+  }
+  return (
+    <ul
+      id="repo-suggestions"
+      role="listbox"
+      className="-mt-2 divide-y divide-gray-100 rounded-sm border border-gray-200 bg-white"
+      data-testid="repo-suggestions"
+    >
+      {repos.map((r, i) => (
+        <li key={r.name} role="option" aria-selected={i === highlight}>
+          <button
+            type="button"
+            // The mouse goes down before the input gives up focus,
+            // which is what keeps the click from landing on a list
+            // that has just been taken away.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onPick(r.name);
+            }}
+            onMouseEnter={() => onHighlight(i)}
+            data-testid={`repo-suggestion-${r.name}`}
+            className={`block w-full px-2 py-1 text-left text-sm ${
+              i === highlight ? 'bg-brand-50' : 'hover:bg-gray-50'
+            }`}
+          >
+            <span className="text-gray-900">{highlighted(r.name, term)}</span>
+            {r.archived ? <Tag>archived</Tag> : null}
+            {r.fork ? <Tag>fork</Tag> : null}
+            {r.description ? (
+              <span className="mt-0.5 block truncate text-xs text-gray-500">{r.description}</span>
+            ) : null}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// A word about a repository that is not the ordinary kind. Both still
+// hold releases, so neither is hidden; both are worth noticing before
+// an app is published from one.
+function Tag({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="ml-1.5 rounded-sm bg-gray-100 px-1 text-[10px] text-gray-600">{children}</span>
+  );
+}
+
+// highlighted puts the typed letters in bold inside the name, which is
+// what makes a list of near-identical names readable at a glance.
+function highlighted(name: string, term: string): React.ReactNode {
+  const at = name.toLowerCase().indexOf(term.toLowerCase());
+  if (term === '' || at < 0) return name;
+  return (
+    <>
+      {name.slice(0, at)}
+      <b className="font-semibold">{name.slice(at, at + term.length)}</b>
+      {name.slice(at + term.length)}
+    </>
+  );
+}
+
 // RepoStatus is the answer to "is this a repository?", shown while the
 // name is being typed rather than after the install is attempted.
 //
@@ -702,6 +805,29 @@ function UploadForm({
     return () => clearTimeout(t);
   }, [repo]);
 
+  // The account's repositories, so that the name can be offered
+  // rather than remembered. Fetched once per ACCOUNT and matched
+  // here: GitHub's repository search would match more thoroughly and
+  // allows an anonymous caller ten requests a MINUTE, which a
+  // type-ahead would spend in seconds from a shared address.
+  //
+  // Debounced on the owner, which changes far less than the box does
+  // -- everything typed after the slash reuses the one answer.
+  const owner = from === 'github' ? ownerOf(repo) : null;
+  const [ownerSlug, setOwnerSlug] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setOwnerSlug(owner ?? ''), owner ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [owner]);
+
+  const repoList = useQuery({
+    queryKey: ['github-repos', ownerSlug],
+    queryFn: ({ signal }) => listRepos(ownerSlug, fetch, signal),
+    enabled: githubAllowed && from === 'github' && ownerSlug !== '',
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+
   const lookup = useQuery({
     queryKey: ['github-releases', slug],
     queryFn: ({ signal }) => {
@@ -713,6 +839,25 @@ function UploadForm({
     staleTime: 5 * 60 * 1000,
     retry: false,
   });
+  // What to offer for what has been typed so far. Withdrawn once the
+  // name resolves to a repository with releases: at that point the
+  // question has been answered, and a list under the box would be
+  // offering to replace an answer that is already right.
+  const term = from === 'github' ? repoTermOf(repo) : '';
+  const settled = lookup.data?.ok === true;
+  const suggestions: RepoSummary[] =
+    repoList.data?.ok && !settled ? rankRepoMatches(repoList.data.repos, term) : [];
+  // Which suggestion the keyboard is on, or -1 for none. Typing
+  // clears it: the highlighted row was about the list that was on
+  // screen, and more letters mean a different list.
+  const [highlight, setHighlight] = useState(-1);
+
+  function take(name: string) {
+    setRepo(`${owner ?? ''}/${name}`);
+    setRepoError(null);
+    setHighlight(-1);
+  }
+
   // Releases to choose from, or null where GitHub did not answer --
   // which is NOT the same as a repository that has published none.
   const releases: Release[] | null = lookup.data?.ok ? lookup.data.releases : null;
@@ -1086,12 +1231,43 @@ function UploadForm({
               spellCheck={false}
               className={INPUT}
               data-testid="upload-repo"
+              role="combobox"
+              aria-expanded={suggestions.length > 0}
+              aria-controls="repo-suggestions"
+              aria-autocomplete="list"
               onChange={(e) => {
                 setRepo(e.target.value);
                 setRepoError(null);
+                setHighlight(-1);
+              }}
+              onKeyDown={(e) => {
+                if (suggestions.length === 0) return;
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setHighlight((h) => (h + 1) % suggestions.length);
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setHighlight((h) => (h <= 0 ? suggestions.length - 1 : h - 1));
+                } else if (e.key === 'Enter' && highlight >= 0) {
+                  // Only when one is picked out. Otherwise Enter in
+                  // this box means what it means in every other box
+                  // on the form, which is submit.
+                  e.preventDefault();
+                  take(suggestions[highlight].name);
+                } else if (e.key === 'Escape') {
+                  setHighlight(-1);
+                }
               }}
             />
           </label>
+          <RepoSuggestions
+            repos={suggestions}
+            term={term}
+            highlight={highlight}
+            onPick={take}
+            onHighlight={setHighlight}
+            truncated={(repoList.data?.ok && repoList.data.truncated && !settled) || false}
+          />
           <RepoStatus
             typed={repo}
             slug={slug}

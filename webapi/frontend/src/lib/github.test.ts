@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  listRepos,
+  ownerOf,
+  rankRepoMatches,
+  repoTermOf,
+  type RepoSummary,
   listReleases,
   parseRepoRef,
   pickBundleAsset,
@@ -319,5 +324,190 @@ describe('choosing the bundle in a release', () => {
     expect(got.ok).toBe(false);
     expect(!got.ok && got.problem).toContain('no asset named missing.zip');
     expect(!got.ok && got.choices).toEqual(['demos.zip']);
+  });
+});
+
+describe('knowing when the owner has been typed', () => {
+  it('waits for the slash', () => {
+    // Until then there is no telling whether `bbockelm` is an account
+    // or the first half of a repository name.
+    expect(ownerOf('bbockelm')).toBeNull();
+    expect(ownerOf('bbockelm/')).toBe('bbockelm');
+    expect(ownerOf('bbockelm/htcondor-site')).toBe('bbockelm');
+  });
+
+  it('finds the owner in a pasted URL too', () => {
+    expect(ownerOf('https://github.com/htcondor/htcondor-ce')).toBe('htcondor');
+  });
+
+  it('says nothing about an owner GitHub could not have', () => {
+    expect(ownerOf('-nope/x')).toBeNull();
+    expect(ownerOf('has space/x')).toBeNull();
+  });
+
+  it('reads what has been typed after the slash', () => {
+    expect(repoTermOf('bbockelm/')).toBe('');
+    expect(repoTermOf('bbockelm/HTCondor-Site')).toBe('htcondor-site');
+    expect(repoTermOf('bbockelm')).toBe('');
+    // A pasted URL carries more path, which is not part of the name.
+    expect(repoTermOf('https://github.com/acme/demos/releases')).toBe('demos');
+  });
+});
+
+describe('listing an account’s repositories', () => {
+  const answer = (status: number, body: unknown) =>
+    (async () =>
+      ({
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => body,
+      }) as Response) as unknown as typeof fetch;
+
+  it('reads the name, the description and what kind of repository it is', async () => {
+    const got = await listRepos(
+      'acme',
+      answer(200, [
+        {
+          name: 'demos',
+          description: 'Example pipelines',
+          pushed_at: '2026-11-14T12:00:00Z',
+          archived: false,
+          fork: false,
+        },
+      ]),
+    );
+    expect(got).toEqual({
+      ok: true,
+      truncated: false,
+      repos: [
+        {
+          name: 'demos',
+          description: 'Example pipelines',
+          pushedAt: '2026-11-14T12:00:00Z',
+          archived: false,
+          fork: false,
+        },
+      ],
+    });
+  });
+
+  it('asks for one account, not one keystroke', async () => {
+    // GitHub's repository search would match more thoroughly and is
+    // limited to ten requests a minute for an anonymous caller, which
+    // a type-ahead would spend in seconds.
+    const fetchImpl = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => [] }) as Response,
+    ) as unknown as typeof fetch;
+    await listRepos('acme', fetchImpl);
+    const [url, init] = (fetchImpl as unknown as { mock: { calls: [string, RequestInit][] } }).mock
+      .calls[0];
+    expect(url).toBe('https://api.github.com/users/acme/repos?per_page=100&sort=pushed');
+    expect(init.credentials).toBe('omit');
+  });
+
+  it('says when there may be more than it was shown', async () => {
+    // A name missing from a truncated list is not thereby a name that
+    // does not exist, and the form must not say otherwise.
+    const page = Array.from({ length: 100 }, (_, i) => ({ name: `r${i}` }));
+    const got = await listRepos('acme', answer(200, page));
+    expect(got.ok && got.truncated).toBe(true);
+    expect((await listRepos('acme', answer(200, page.slice(0, 99)))).ok).toBe(true);
+    expect(
+      (await listRepos('acme', answer(200, page.slice(0, 99)))) as { truncated: boolean },
+    ).toHaveProperty('truncated', false);
+  });
+
+  it('keeps an account that is not there apart from GitHub not answering', async () => {
+    expect(await listRepos('acme', answer(404, {}))).toEqual({ ok: false, reason: 'no-owner' });
+    expect(await listRepos('acme', answer(403, {}))).toEqual({
+      ok: false,
+      reason: 'rate-limited',
+    });
+    expect(await listRepos('acme', answer(500, {}))).toEqual({
+      ok: false,
+      reason: 'unreachable',
+    });
+    const boom = (async () => {
+      throw new TypeError('Failed to fetch');
+    }) as unknown as typeof fetch;
+    expect(await listRepos('acme', boom)).toEqual({ ok: false, reason: 'unreachable' });
+  });
+
+  it('does not ask about an owner GitHub could not have', async () => {
+    const spy = vi.fn();
+    expect(await listRepos('-nope', spy as unknown as typeof fetch)).toEqual({
+      ok: false,
+      reason: 'no-owner',
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('choosing which repositories to offer', () => {
+  const r = (name: string, extra: Partial<RepoSummary> = {}): RepoSummary => ({
+    name,
+    description: '',
+    pushedAt: '2026-01-01T00:00:00Z',
+    archived: false,
+    fork: false,
+    ...extra,
+  });
+
+  it('puts a name that starts with what was typed above one that merely contains it', () => {
+    // Both of the other orderings -- alphabetical, and most recently
+    // pushed -- point the other way here, so only the prefix rule can
+    // produce this answer.
+    const got = rankRepoMatches(
+      [
+        r('a-legacy-htcondor', { pushedAt: '2026-11-01T00:00:00Z' }),
+        r('htcondor-ce', { pushedAt: '2020-01-01T00:00:00Z' }),
+      ],
+      'htcondor',
+    );
+    expect(got.map((x) => x.name)).toEqual(['htcondor-ce', 'a-legacy-htcondor']);
+  });
+
+  it('offers an archived repository and a fork, but after the live ones', () => {
+    // All three can hold a release, so none is excluded; only one of
+    // them is usually what was meant.
+    // Named so that alphabetical order points the other way: only the
+    // ranking can put the plain repository first.
+    const got = rankRepoMatches(
+      [
+        r('demos-archived', { archived: true }),
+        r('demos-a-fork', { fork: true }),
+        r('demos-z-live'),
+      ],
+      'demos',
+    );
+    expect(got.map((x) => x.name)).toEqual(['demos-z-live', 'demos-a-fork', 'demos-archived']);
+  });
+
+  it('breaks a tie by what was pushed to most recently', () => {
+    const got = rankRepoMatches(
+      [
+        r('demos-old', { pushedAt: '2020-01-01T00:00:00Z' }),
+        r('demos-new', { pushedAt: '2026-11-01T00:00:00Z' }),
+      ],
+      'demos',
+    );
+    expect(got.map((x) => x.name)).toEqual(['demos-new', 'demos-old']);
+  });
+
+  it('answers the same whatever order GitHub listed them in', () => {
+    const repos = [r('demos-a'), r('demos-b'), r('demos-c')];
+    const forward = rankRepoMatches(repos, 'demos').map((x) => x.name);
+    expect(rankRepoMatches([...repos].reverse(), 'demos').map((x) => x.name)).toEqual(forward);
+  });
+
+  it('ignores case, and offers only a few', () => {
+    const many = Array.from({ length: 20 }, (_, i) => r(`demos-${i}`));
+    expect(rankRepoMatches(many, 'DEMOS')).toHaveLength(5);
+    expect(rankRepoMatches(many, 'demos', 3)).toHaveLength(3);
+  });
+
+  it('offers nothing for an empty term, rather than everything', () => {
+    expect(rankRepoMatches([r('demos')], '')).toEqual([]);
+    expect(rankRepoMatches([r('demos')], '   ')).toEqual([]);
   });
 });

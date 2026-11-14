@@ -65,6 +65,162 @@ export function repoSlug(r: RepoRef): string {
   return `${r.owner}/${r.repo}`;
 }
 
+/**
+ * The owner, once enough has been typed to know what it is.
+ *
+ * `bbockelm/h` has an owner and a repository; `bbockelm/` has an owner
+ * and nothing after it; `bbockelm` is still being typed and has
+ * neither, because there is no telling whether that is an account or
+ * the first half of a repository name. The slash is what decides.
+ */
+export function ownerOf(raw: string): string | null {
+  let slug = raw.trim();
+  for (const prefix of ['https://github.com/', 'http://github.com/', 'github.com/']) {
+    if (slug.startsWith(prefix)) {
+      slug = slug.slice(prefix.length);
+      break;
+    }
+  }
+  const slash = slug.indexOf('/');
+  if (slash < 0) return null;
+  const owner = slug.slice(0, slash);
+  return OWNER.test(owner) ? owner : null;
+}
+
+/** What is being typed after the slash, lowercased for matching. */
+export function repoTermOf(raw: string): string {
+  let slug = raw.trim();
+  for (const prefix of ['https://github.com/', 'http://github.com/', 'github.com/']) {
+    if (slug.startsWith(prefix)) {
+      slug = slug.slice(prefix.length);
+      break;
+    }
+  }
+  const slash = slug.indexOf('/');
+  if (slash < 0) return '';
+  return slug.slice(slash + 1).split('/')[0].trim().toLowerCase();
+}
+
+/** One of an account's repositories, as a suggestion needs it. */
+export interface RepoSummary {
+  name: string;
+  description: string;
+  /** RFC 3339, or '' where GitHub did not say. */
+  pushedAt: string;
+  archived: boolean;
+  fork: boolean;
+}
+
+/**
+ * What an account's repositories came back as.
+ *
+ * `truncated` means GitHub had at least a full page and there may be
+ * more, which matters because a name that is not in the list is not
+ * thereby a name that does not exist. Suggestions are a convenience;
+ * typing a repository in full still works, because the release
+ * lookup addresses it exactly rather than searching for it.
+ */
+export type RepoListResult =
+  | { ok: true; repos: RepoSummary[]; truncated: boolean }
+  | { ok: false; reason: 'no-owner' | 'rate-limited' | 'unreachable' };
+
+/** One page is plenty to suggest from, and is one request. */
+const REPO_PAGE = 100;
+
+/**
+ * List an account's public repositories, most recently pushed first.
+ *
+ * One request per ACCOUNT, not per keystroke: the matching is done
+ * here, against a list that is fetched once and cached. GitHub's
+ * repository search would match more thoroughly, but it is limited to
+ * ten requests a minute for an anonymous caller -- a budget a
+ * type-ahead would spend in seconds, from an address shared with
+ * everyone else on the campus.
+ *
+ * `/users/{owner}/repos` answers for an organization as well as a
+ * person, so one path covers both.
+ */
+export async function listRepos(
+  owner: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<RepoListResult> {
+  if (!OWNER.test(owner)) return { ok: false, reason: 'no-owner' };
+  let res: Response;
+  try {
+    res = await fetchImpl(
+      `https://api.github.com/users/${owner}/repos?per_page=${REPO_PAGE}&sort=pushed`,
+      { headers: { Accept: 'application/vnd.github+json' }, credentials: 'omit', signal },
+    );
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (!res.ok) {
+    if (res.status === 404) return { ok: false, reason: 'no-owner' };
+    if (res.status === 403 || res.status === 429) return { ok: false, reason: 'rate-limited' };
+    return { ok: false, reason: 'unreachable' };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (!Array.isArray(body)) return { ok: false, reason: 'unreachable' };
+  const repos: RepoSummary[] = [];
+  for (const raw of body) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.name !== 'string' || r.name === '') continue;
+    repos.push({
+      name: r.name,
+      description: typeof r.description === 'string' ? r.description : '',
+      pushedAt: typeof r.pushed_at === 'string' ? r.pushed_at : '',
+      archived: r.archived === true,
+      fork: r.fork === true,
+    });
+  }
+  return { ok: true, repos, truncated: body.length >= REPO_PAGE };
+}
+
+/**
+ * The repositories worth offering for what has been typed so far.
+ *
+ * A name that STARTS with what was typed comes before one that merely
+ * contains it, because the first is what someone typing a name they
+ * know is heading for. Within that, a repository still being worked on
+ * comes before one that is archived or a fork of somebody else's --
+ * all three can hold a release, so none is excluded, but only one of
+ * them is usually what was meant.
+ *
+ * Ties go to the most recently pushed, and then to the name, so that
+ * the same letters always produce the same list.
+ */
+export function rankRepoMatches(
+  repos: readonly RepoSummary[],
+  term: string,
+  limit = 5,
+): RepoSummary[] {
+  const want = term.trim().toLowerCase();
+  if (want === '') return [];
+  const scored: { r: RepoSummary; tier: number }[] = [];
+  for (const r of repos) {
+    const name = r.name.toLowerCase();
+    const where = name.indexOf(want);
+    if (where < 0) continue;
+    // 0 best. The first bit is how it matched, the second whether it
+    // is the kind of repository someone publishes an app from.
+    const tier = (where === 0 ? 0 : 4) + (r.archived ? 2 : 0) + (r.fork ? 1 : 0);
+    scored.push({ r, tier });
+  }
+  scored.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    if (a.r.pushedAt !== b.r.pushedAt) return a.r.pushedAt < b.r.pushedAt ? 1 : -1;
+    return a.r.name < b.r.name ? -1 : 1;
+  });
+  return scored.slice(0, limit).map((s) => s.r);
+}
+
 /** A file attached to a release. */
 export interface ReleaseAsset {
   name: string;
