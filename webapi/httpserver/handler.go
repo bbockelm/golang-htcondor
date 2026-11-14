@@ -463,6 +463,12 @@ type Handler struct {
 	// default -- an uploaded app runs with the rights of everyone who
 	// opens it, so it is not implied by administering the server.
 	siteAppUpload bool
+	// siteAppGitHub is HTTP_API_SITE_APPS_GITHUB: whether this server
+	// will fetch a bundle from a GitHub release. On by default, and
+	// only consulted where siteAppUpload is already on -- it governs
+	// egress, not authority. An access point with no route out turns
+	// it off so the page stops offering an action that can only fail.
+	siteAppGitHub bool
 	mcpAdminUsers []string // Authenticated subjects exempt from the MCP owner-scope wrapper
 	// poolQueryPolicy restricts which collector attributes an
 	// unprivileged caller reads. Never nil after NewHandler; an
@@ -1223,6 +1229,11 @@ type HandlerConfig struct {
 	// administrators may publish a bundle through the web interface.
 	// False unless the site says otherwise; see siteapps_admin.go.
 	SiteAppsUpload bool
+	// SiteAppsGitHub is HTTP_API_SITE_APPS_GITHUB: whether a bundle
+	// may be fetched from a GitHub release rather than attached. True
+	// unless the site says otherwise; it has no effect where
+	// SiteAppsUpload is false.
+	SiteAppsGitHub bool
 	// SiteAppsReloadInterval is how often that directory is rescanned,
 	// so dropping a new bundle in place needs no restart and no signal.
 	// Zero selects defaultSiteAppsReload.
@@ -2175,6 +2186,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	h.webuiAppOnlyGroups = newGroupSet(cfg.WebUIAppOnlyGroup)
 	h.siteAppsReloadInterval = cfg.SiteAppsReloadInterval
 	h.siteAppUpload = cfg.SiteAppsUpload
+	h.siteAppGitHub = cfg.SiteAppsGitHub
 	h.siteApps = h.newSiteAppLibrary(cfg.SiteAppsDir, cfg.HTCondorConfig)
 	h.branding = newBrandingState(logger, brandingOptions{
 		SiteName:    cfg.WebUISiteName,

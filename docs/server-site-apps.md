@@ -146,6 +146,48 @@ Leaving this off is a reasonable choice for an access point whose
 configuration is managed centrally: the page still shows what is
 published and what has been, and says where to put a bundle.
 
+### Installing from a GitHub release
+
+A bundle published as a release asset can be fetched by the access
+point instead of attached by hand. On the publish form, choose **From a
+GitHub release** and give the repository as `owner/name`; leave the
+release blank for the latest, or name a tag.
+
+What this does, in order: asks GitHub which release is meant, takes the
+release's only `.zip` (or the asset you name, where there is more than
+one), reads the `.sha256` published beside it, downloads the bundle,
+and **refuses it unless the bytes hash to what that checksum says**.
+Only then does it become the file the app is served from. The checksum
+is written into the bundle directory too, so every later rescan
+re-verifies it rather than taking this one download's word.
+
+The repository must be public. Fetching a private one needs a GitHub
+credential stored on the access point, which is a secret with its own
+rotation and blast radius; download the asset yourself and attach it
+instead.
+
+Two things worth knowing about how this is built:
+
+* **You give a repository, not a URL.** This is the one request the
+  access point makes on a caller's behalf, and it runs inside your
+  network, where a general "fetch this address" endpoint could reach a
+  daemon's admin port or a cloud metadata service. The server builds
+  the address from the pieces, and follows redirects only while they
+  stay on GitHub's hosts.
+* **The server downloads; your browser checks for updates.** GitHub
+  allows a page to read release metadata cross-origin but not to read
+  the asset, so the two halves cannot live in the same place.
+
+The release that was installed is recorded against the app. The page
+then shows where each app came from, and marks one whose repository has
+since published a different release — a link, not a demand: a site that
+pinned an older tag on purpose is told what is current and decides for
+itself. That check is made by the browser that is looking at the page,
+so the access point does not poll GitHub on a schedule.
+
+Set `HTTP_API_SITE_APPS_GITHUB = false` to leave this out, on an access
+point with no route to the internet. Attaching a file still works.
+
 ### Settings on the page
 
 Opening an app's row shows its settings as the parameters above:
@@ -295,6 +337,7 @@ staff that is usually an easy call. It should still be a knowing one.
 | `HTTP_API_SITE_APPS_RELOAD_INTERVAL` | How often that directory is rescanned, as a Go duration (`30s`, `5m`). Default one minute. Changing it needs a restart. |
 | `HTTP_API_SITE_APP_<ID>_*` | One app's policy; see [The parameters](#the-parameters). Re-read on every `condor_reconfig`, which also rescans the directory. |
 | `HTTP_API_SITE_APPS_UPLOAD` | Whether administrators may publish a bundle from the web interface. Off by default; see [Publishing from the web interface](#publishing-from-the-web-interface). |
+| `HTTP_API_SITE_APPS_GITHUB` | Whether a bundle may be fetched from a GitHub release rather than attached. On by default, and only consulted where `HTTP_API_SITE_APPS_UPLOAD` is already on; see [Installing from a GitHub release](#installing-from-a-github-release). |
 | `HTTP_API_WEBUI_APP_ONLY_GROUP` | Comma-separated groups whose members land in their app rather than the dashboard. Reloaded on SIGHUP. |
 
 An unpacked directory works in place of a zip, with the same layout, for

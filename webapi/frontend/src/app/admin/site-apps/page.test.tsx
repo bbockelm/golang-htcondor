@@ -777,3 +777,165 @@ describe('the publish form', () => {
     expect(screen.getByTestId('app-cryoem')).toHaveTextContent('alice');
   });
 });
+
+// Installing from a GitHub release.
+//
+// The bundle is fetched by the SERVER and the update check is made by
+// the BROWSER, and that split is not a preference: api.github.com
+// answers cross-origin, the host that serves the release asset does
+// not. These tests cover the half this page owns.
+describe('installing from a GitHub release', () => {
+  // An app that was installed from a release, so it has provenance to
+  // carry and something to compare against.
+  const installed = app({
+    id: 'demos',
+    name: 'Example Pipeline',
+    managed: true,
+    origin: 'uploaded through the web interface',
+    url: '/site/demos/',
+    version: '0.1',
+    source: {
+      kind: 'github',
+      repo: 'bbockelm/htcondor-site-app-template',
+      ref: 'v0.1',
+      asset: 'demos.zip',
+    },
+  });
+
+  function releasesReturn(tag: string) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          tag_name: tag,
+          html_url: `https://github.com/o/r/releases/tag/${tag}`,
+        }),
+      })),
+    );
+  }
+
+  beforeEach(() => {
+    // No release information unless a test asks for it, so a page
+    // that is not about the badge does not reach the network.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 404 })),
+    );
+  });
+
+  it('offers to fetch from a release only where the server will', async () => {
+    // An access point with no egress gets no such button: the choice
+    // would be between attaching a file and waiting for a timeout.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: false }));
+    const { unmount } = renderPage();
+    await screen.findByTestId('upload-form');
+    expect(screen.queryByTestId('from-github')).toBeNull();
+    expect(screen.getByTestId('upload-bundle')).toBeInTheDocument();
+    unmount();
+
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    renderPage();
+    await screen.findByTestId('upload-form');
+    expect(screen.getByTestId('from-github')).toBeInTheDocument();
+  });
+
+  it('swaps the file picker for a repository when fetching from a release', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    expect(screen.getByTestId('github-fields')).toBeInTheDocument();
+    // The file input is gone rather than hidden: it is marked
+    // required, and a required input that cannot be filled in blocks
+    // the form with no visible reason why.
+    expect(screen.queryByTestId('upload-bundle')).toBeNull();
+  });
+
+  it('sends the repository rather than a file', async () => {
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    uploadSiteApp.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-ref'), { target: { value: 'v0.2' } });
+    fireEvent.click(screen.getByTestId('upload-submit'));
+
+    await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
+    const sent = uploadSiteApp.mock.calls[0][0] as FormData;
+    expect(sent.get('source')).toBe('github');
+    expect(sent.get('repo')).toBe('bbockelm/htcondor-site-app-template');
+    expect(sent.get('ref')).toBe('v0.2');
+    expect(sent.get('id')).toBe('demos');
+  });
+
+  it('carries the repository into an update but never the tag', async () => {
+    // The repository is almost always the same one. The tag is the
+    // one thing an update changes, so a prefilled old tag would
+    // reinstall exactly what is already there.
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    renderPage();
+    await screen.findByTestId('upload-form');
+    expect(screen.getByTestId('upload-repo')).toHaveValue('bbockelm/htcondor-site-app-template');
+    expect(screen.getByTestId('upload-ref')).toHaveValue('');
+  });
+
+  it('will not fetch without a repository', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    expect(await screen.findByTestId('upload-repo-error')).toBeInTheDocument();
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('says where an installed app came from', async () => {
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    renderPage();
+    const src = await screen.findByTestId('source-demos');
+    expect(src).toHaveTextContent('bbockelm/htcondor-site-app-template');
+    expect(src).toHaveTextContent('v0.1');
+  });
+
+  it('badges an app whose repository has moved on', async () => {
+    releasesReturn('v0.3');
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    renderPage();
+    const badge = await screen.findByTestId('update-demos');
+    expect(badge).toHaveTextContent('v0.3');
+  });
+
+  it('is quiet when the installed release is the current one', async () => {
+    releasesReturn('v0.1');
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    renderPage();
+    await screen.findByTestId('source-demos');
+    await waitFor(() => expect(screen.queryByTestId('update-demos')).toBeNull());
+  });
+
+  it('shows no badge for an app that was uploaded as a file', async () => {
+    // Nothing to compare against, and nothing to ask GitHub about.
+    releasesReturn('v9.9');
+    const byHand = app({ id: 'byhand', managed: true, url: '/site/byhand/', source: undefined });
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [byHand] }),
+    );
+    renderPage();
+    await screen.findByTestId('app-byhand');
+    expect(screen.queryByTestId('update-byhand')).toBeNull();
+    expect(screen.queryByTestId('source-byhand')).toBeNull();
+  });
+});

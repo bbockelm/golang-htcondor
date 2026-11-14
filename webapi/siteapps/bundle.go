@@ -287,6 +287,14 @@ func digestFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// ParseDigestSidecar extracts the hash from the contents of a .sha256
+// file.
+//
+// Exported so that code which WRITES a sidecar and the loader that
+// later reads it agree by construction, rather than by two parsers
+// happening to accept the same shapes.
+func ParseDigestSidecar(data []byte) (string, error) { return parseDigestSidecar(data) }
+
 // parseDigestSidecar extracts the hash from a .sha256 file.
 //
 // Accepts both the bare hash and the `shasum`/`sha256sum` output

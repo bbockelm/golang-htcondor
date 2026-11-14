@@ -106,3 +106,76 @@ function editDistance(a: string, b: string): number {
   }
   return prev[b.length];
 }
+
+/**
+ * A repository's current release, as GitHub reports it.
+ */
+export interface LatestRelease {
+  /** The tag, exactly as the release carries it. */
+  tag: string;
+  /** The release page, for a link the administrator can check. */
+  url: string;
+}
+
+/**
+ * Ask GitHub which release a repository is currently on.
+ *
+ * This runs in the BROWSER, not on the access point, and that split is
+ * forced rather than chosen. GitHub serves api.github.com with
+ * `Access-Control-Allow-Origin: *`, so a page may read release
+ * metadata directly; it does not serve the release ASSET that way --
+ * the download redirects to release-assets.githubusercontent.com,
+ * which sends no CORS headers at all. So the question "is there a
+ * newer one?" is answered here for free, while fetching the bundle has
+ * to go through the server.
+ *
+ * Returns null on any failure, deliberately. This decorates a listing
+ * that is already correct and complete; GitHub being unreachable, rate
+ * limiting the viewer's address, or having deleted the repository are
+ * all reasons to show no badge, never reasons to show an error on a
+ * page about something else.
+ */
+export async function latestRelease(
+  repo: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<LatestRelease | null> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(repo)) return null;
+  try {
+    const res = await fetchImpl(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      // No credentials: this is a public read, and the viewer's
+      // GitHub cookies have no business on it.
+      credentials: 'omit',
+    });
+    if (!res.ok) return null;
+    const body: unknown = await res.json();
+    if (typeof body !== 'object' || body === null) return null;
+    const { tag_name: tag, html_url: url } = body as { tag_name?: unknown; html_url?: unknown };
+    if (typeof tag !== 'string' || tag === '') return null;
+    return { tag, url: typeof url === 'string' ? url : `https://github.com/${repo}/releases` };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the release a repository is on now differs from the one
+ * installed.
+ *
+ * DIFFERENT, not newer. Comparing versions properly means knowing the
+ * scheme a project tags with, and guessing it wrong tells an
+ * administrator their up-to-date app is stale. A site that pinned an
+ * older tag on purpose is told what the current release is and decides
+ * for itself.
+ *
+ * A leading `v` is ignored on both sides: `v0.2` and `0.2` are one
+ * release written two ways, and a badge that fired on that difference
+ * would never go away.
+ */
+export function releaseDiffers(installed?: string, latest?: string): boolean {
+  const norm = (s?: string) => (s ?? '').trim().replace(/^v/i, '').toLowerCase();
+  const a = norm(installed);
+  const b = norm(latest);
+  if (a === '' || b === '') return false;
+  return a !== b;
+}

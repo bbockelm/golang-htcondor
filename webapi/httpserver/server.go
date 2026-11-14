@@ -398,6 +398,9 @@ type Config struct {
 	// SiteAppsUpload is whether administrators may publish a bundle
 	// through the web interface (HTTP_API_SITE_APPS_UPLOAD).
 	SiteAppsUpload bool
+	// SiteAppsGitHub is whether a bundle may be fetched from a GitHub
+	// release rather than attached (HTTP_API_SITE_APPS_GITHUB).
+	SiteAppsGitHub bool
 	// MCPSkillsReloadInterval is how often that directory is re-read so a
 	// checkout updated underneath this process is noticed without a
 	// reconfigure. Zero disables the poll.
@@ -653,6 +656,7 @@ func NewServer(cfg Config) (*Server, error) {
 		SiteAppsDir:                 cfg.SiteAppsDir,
 		SiteAppsReloadInterval:      cfg.SiteAppsReloadInterval,
 		SiteAppsUpload:              cfg.SiteAppsUpload,
+		SiteAppsGitHub:              cfg.SiteAppsGitHub,
 		MCPSkillsReloadInterval:     cfg.MCPSkillsReloadInterval,
 		UpstreamRefresh:             cfg.UpstreamRefresh,
 		MCPMaxRequestDuration:       cfg.MCPMaxRequestDuration,

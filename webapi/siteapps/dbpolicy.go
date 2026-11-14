@@ -45,6 +45,18 @@ type Upload struct {
 	UploadedAt  time.Time
 	Digest      string
 	SizeBytes   int64
+
+	// SourceRepo, SourceRef and SourceAsset are where the bundle came
+	// from, for one the server fetched rather than one handed over as
+	// bytes. Empty for an uploaded file: nothing about it says where
+	// it was built.
+	//
+	// SourceRef is the tag that was resolved, never the word
+	// "latest" -- a row saying "latest" would compare equal to every
+	// future release, and the update check would never fire.
+	SourceRepo  string
+	SourceRef   string
+	SourceAsset string
 }
 
 // DBPolicy reads policy from the uploads table.
@@ -241,15 +253,19 @@ func (s *UploadStore) Put(ctx context.Context, u Upload) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO site_app_uploads
 			(app_id, app_groups, home, enabled, name, description, icon,
-			 uploaded_by, uploaded_at, digest, size_bytes)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)
+			 uploaded_by, uploaded_at, digest, size_bytes,
+			 source_repo, source_ref, source_asset)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(app_id) DO UPDATE SET
 			app_groups=excluded.app_groups, home=excluded.home, enabled=excluded.enabled,
 			name=excluded.name, description=excluded.description, icon=excluded.icon,
 			uploaded_by=excluded.uploaded_by, uploaded_at=excluded.uploaded_at,
-			digest=excluded.digest, size_bytes=excluded.size_bytes`,
+			digest=excluded.digest, size_bytes=excluded.size_bytes,
+			source_repo=excluded.source_repo, source_ref=excluded.source_ref,
+			source_asset=excluded.source_asset`,
 		u.AppID, strings.Join(u.Groups, ","), boolToInt(u.Home), boolToInt(u.Enabled),
-		u.Name, u.Description, u.Icon, u.UploadedBy, u.UploadedAt.Unix(), u.Digest, u.SizeBytes)
+		u.Name, u.Description, u.Icon, u.UploadedBy, u.UploadedAt.Unix(), u.Digest, u.SizeBytes,
+		u.SourceRepo, u.SourceRef, u.SourceAsset)
 	if err != nil {
 		return fmt.Errorf("record uploaded app %q: %w", u.AppID, err)
 	}
@@ -273,10 +289,12 @@ func (s *UploadStore) Get(ctx context.Context, id string) (Upload, bool, error) 
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT app_id, app_groups, home, enabled, name, description, icon,
-		       uploaded_by, uploaded_at, digest, size_bytes
+		       uploaded_by, uploaded_at, digest, size_bytes,
+		       source_repo, source_ref, source_asset
 		  FROM site_app_uploads WHERE app_id = ?`, id).
 		Scan(&u.AppID, &groups, &home, &enabled, &u.Name, &u.Description, &u.Icon,
-			&u.UploadedBy, &at, &u.Digest, &u.SizeBytes)
+			&u.UploadedBy, &at, &u.Digest, &u.SizeBytes,
+			&u.SourceRepo, &u.SourceRef, &u.SourceAsset)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return Upload{}, false, nil
@@ -308,7 +326,8 @@ func (s *UploadStore) List(ctx context.Context) ([]Upload, error) {
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_id, app_groups, home, enabled, name, description, icon,
-		       uploaded_by, uploaded_at, digest, size_bytes
+		       uploaded_by, uploaded_at, digest, size_bytes,
+		       source_repo, source_ref, source_asset
 		  FROM site_app_uploads ORDER BY app_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list uploaded apps: %w", err)
@@ -323,7 +342,8 @@ func (s *UploadStore) List(ctx context.Context) ([]Upload, error) {
 			at            int64
 		)
 		if err := rows.Scan(&u.AppID, &groups, &home, &enabled, &u.Name, &u.Description, &u.Icon,
-			&u.UploadedBy, &at, &u.Digest, &u.SizeBytes); err != nil {
+			&u.UploadedBy, &at, &u.Digest, &u.SizeBytes,
+			&u.SourceRepo, &u.SourceRef, &u.SourceAsset); err != nil {
 			return nil, fmt.Errorf("list uploaded apps: %w", err)
 		}
 		u.Groups, u.Home, u.Enabled, u.UploadedAt = ParseGroupList(groups), home != 0, enabled != 0, time.Unix(at, 0)
