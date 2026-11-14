@@ -167,6 +167,36 @@ describe('site apps admin page', () => {
     expect(row).toHaveTextContent('HTTP_API_SITE_APP_CRYOEM_GROUPS');
   });
 
+  // "*" is what the configuration writes, and a reader of the column
+  // should not have to know that. Both tables show the same list, so
+  // both are checked here.
+  it('names everyone rather than printing the configuration\u2019s star', async () => {
+    listSiteApps.mockResolvedValue(listing({ apps: [app({ groups: ['*'] })] }));
+    const history: AdminSiteAppHistory[] = [
+      {
+        digest: 'bbbb2222cccc',
+        attested: true,
+        version: '2.1.0',
+        groups: ['*'],
+        home: false,
+        origin: 'HTTP_API_SITE_APP_CRYOEM_GROUPS',
+        first_seen: '2026-11-03T10:00:00Z',
+        last_seen: '2026-11-12T09:00:00Z',
+      },
+    ];
+    siteAppHistory.mockResolvedValue({ id: 'cryoem', history });
+
+    renderPage();
+    const row = await screen.findByTestId('app-cryoem');
+    expect(row).toHaveTextContent('Everyone');
+    expect(row).not.toHaveTextContent('*');
+
+    fireEvent.click(await screen.findByTestId('history-cryoem'));
+    const table = await screen.findByTestId('history-table');
+    expect(table).toHaveTextContent('Everyone');
+    expect(table).not.toHaveTextContent('*');
+  });
+
   // The upload form is the privilege. It must not be reachable when
   // the server would refuse it, or an administrator fills it in and
   // gets a 403 for their trouble.
@@ -391,7 +421,7 @@ describe('an app’s settings', () => {
     );
   });
 
-  it('says a change takes effect without a reconfigure, and only for a stored app', async () => {
+  it('says the configuration file wins, for a stored app', async () => {
     listSiteApps.mockResolvedValue(
       listing({ upload_allowed: true, apps: [app({ managed: true })] }),
     );
@@ -399,8 +429,7 @@ describe('an app’s settings', () => {
     renderPage();
     fireEvent.click(await screen.findByTestId('app-cryoem'));
     const note = await screen.findByTestId('config-note');
-    expect(note).toHaveTextContent('at once');
-    expect(note).toHaveTextContent('HTTP_API_SITE_APP_CRYOEM_GROUPS');
+    expect(note).toHaveTextContent('configuration file take precedence');
   });
 
   it('will not save an empty group list', async () => {

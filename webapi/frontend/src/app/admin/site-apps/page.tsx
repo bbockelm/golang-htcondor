@@ -65,6 +65,14 @@ function formatWhen(iso: string): string {
   return d.toLocaleString();
 }
 
+// visibleTo is a group list as a reader wants it: the configuration
+// writes "*" for every authenticated user, and a table column is not
+// the place to learn that.
+function visibleTo(groups: string[]): string {
+  if (groups.includes(EVERYONE)) return 'Everyone';
+  return groups.join(', ');
+}
+
 // shortDigest is the first twelve characters, which is enough to
 // compare two by eye and short enough to sit in a table.
 function shortDigest(d?: string): string {
@@ -138,7 +146,7 @@ function AppHistory({ id }: { id: string }) {
                   </span>
                 ) : null}
               </td>
-              <td className={TD}>{h.groups.join(', ')}</td>
+              <td className={TD}>{visibleTo(h.groups)}</td>
               <td className={`${TD} text-gray-500`}>{h.origin}</td>
             </tr>
           ))}
@@ -229,7 +237,7 @@ function AppConfig({ id }: { id: string }) {
         <div>
           <h3 className="text-sm font-semibold text-gray-900">Settings</h3>
           <p className="text-xs text-gray-500">
-            The configuration parameters for this app, named as the configuration names them.
+            The configuration parameters for this app.
           </p>
         </div>
         {cfg.editable ? (
@@ -270,17 +278,10 @@ function AppConfig({ id }: { id: string }) {
       {cfg.stored_here ? (
         <p className="text-xs text-gray-600" data-testid="config-note">
           {cfg.editable ? (
-            <>
-              These are kept by this access point, because <Code>{id}</Code> was published from
-              this page. Saving applies them at once — no <Code>condor_reconfig</Code>. A{' '}
-              <Code>{groupsKey}</Code> in the configuration would take precedence over everything
-              here.
-            </>
+            <>Settings in the configuration file take precedence over these.</>
           ) : (
             <>
-              These are kept by this access point, because <Code>{id}</Code> was published from
-              this page. They cannot be changed here while{' '}
-              <Code>HTTP_API_SITE_APPS_UPLOAD</Code> is off.
+              These cannot be changed here while <Code>HTTP_API_SITE_APPS_UPLOAD</Code> is off.
             </>
           )}
         </p>
@@ -410,11 +411,7 @@ function GroupsField({
         />
         Everyone signed in to this access point
       </label>
-      {everyone ? (
-        <p className="mt-1 text-xs text-gray-500">
-          Sent as <Code>{EVERYONE}</Code>, which is what the configuration writes for it.
-        </p>
-      ) : (
+      {everyone ? null : (
         <>
           {groups.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1">
@@ -613,8 +610,7 @@ function UploadForm({
       <div>
         <h2 className="text-sm font-semibold text-gray-900">Publish a bundle</h2>
         <p className="mt-1 text-xs text-gray-500">
-          The app is served at <Code>/site/&lt;id&gt;/</Code> to the groups you name. It runs
-          with the rights of everyone who opens it, in code this release does not review.
+          The app is served at <Code>/site/&lt;id&gt;/</Code> to the groups you name.
         </p>
       </div>
 
@@ -832,8 +828,8 @@ function Header() {
       <h1 className="text-2xl font-bold text-gray-900">Site apps</h1>
       <p className="text-sm text-gray-500">
         Single-page apps this access point serves under <Code>/site/&lt;id&gt;/</Code>, each
-        visible only to the groups it names. The table is what is published now; open a row for
-        its settings and what was published before.
+        visible only to the groups it names. Open a row for its settings and publication
+        history.
       </p>
     </div>
   );
@@ -998,7 +994,7 @@ function AppRows({
           ) : null}
         </td>
         <td className={TD}>
-          {a.groups.join(', ')}
+          {visibleTo(a.groups)}
           {a.home ? <div className="text-xs text-gray-500">home</div> : null}
         </td>
         <td className={`${TD} text-gray-500`}>
@@ -1038,13 +1034,7 @@ function AppRows({
             <div className="space-y-4" data-testid="history-section">
               <AppConfig id={a.id} />
               <div className="space-y-2">
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-900">What has been served</h3>
-                  <p className="text-xs text-gray-500">
-                    One row per period this app was served from one bundle under one policy. A
-                    new row means the bundle or who could see it changed.
-                  </p>
-                </div>
+                <h3 className="text-sm font-semibold text-gray-900">What has been served</h3>
                 <AppHistory id={a.id} />
               </div>
             </div>
