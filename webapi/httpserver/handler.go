@@ -2785,7 +2785,7 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isTransparentProxyPath(r.URL.Path) {
 		// The site's own logo origins widen img-src; see
 		// brandingSnapshot.imgSrc.
-		applySecurityHeaders(w, h.branding.snapshot().imgSrc)
+		applySecurityHeaders(w, h.branding.snapshot().imgSrc, h.siteAppGitHub)
 	}
 	// Bound every request body, for the same reason again: a route added
 	// later inherits it. Routes that need more (uploads, MCP) or less say
@@ -3047,23 +3047,43 @@ func (h *Handler) isUserHeaderTrustedSource(r *http.Request) bool {
 //
 // The frame-ancestors directive in CSP duplicates X-Frame-Options
 // for browsers that honor CSP only; both are cheap to send.
+//
 //   - img-src is widened by the origins of any absolute logo URLs the
 //     site configured (HTTP_API_WEBUI_FOOTER_LOGOS, HTTP_API_WEBUI_FAVICON).
 //     Without that, a logo hosted on the university's own web server
 //     would be refused by the policy and the operator would see an
 //     empty footer and a console message. Only those origins, and only
 //     for images.
-func applySecurityHeaders(w http.ResponseWriter, brandingImgSrc string) {
+//
+//   - connect-src is widened by api.github.com where this server
+//     offers installing a site app from a GitHub release. There is no
+//     connect-src here otherwise, so it falls back to default-src
+//     'self' and the page may not call anything off this origin --
+//     which is what the site apps admin page needs to do, and the only
+//     thing it needs to do, to list a repository's releases and to
+//     notice that an installed app's repository has published a new
+//     one. Metadata only: the release ASSET is fetched by this server,
+//     because GitHub does not serve it cross-origin at all.
+//
+//     Named rather than left open because a policy that permits any
+//     origin permits exfiltration to any origin, which is most of what
+//     a CSP on an authenticated page is for.
+func applySecurityHeaders(w http.ResponseWriter, brandingImgSrc string, gitHub bool) {
 	h := w.Header()
 	if h.Get("Content-Security-Policy") == "" {
 		if brandingImgSrc != "" {
 			brandingImgSrc = " " + brandingImgSrc
+		}
+		connectSrc := "connect-src 'self'"
+		if gitHub {
+			connectSrc += " https://api.github.com"
 		}
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; "+
 				"img-src 'self' data: blob:"+brandingImgSrc+"; "+
 				"style-src 'self' 'unsafe-inline'; "+
 				"script-src 'self' 'unsafe-inline'; "+
+				connectSrc+"; "+
 				"object-src 'none'; "+
 				"frame-ancestors 'self'; "+
 				"base-uri 'self'")
