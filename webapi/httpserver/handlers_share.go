@@ -37,10 +37,12 @@ func (s *Handler) verifyShareToken(tok string, want shareurl.Kind) (*shareurl.Pa
 	return s.shareSigner.Verify(tok, want)
 }
 
-// shareURLBase returns the absolute URL prefix to use when minting share
-// URLs. Falls back to deriving from the request when HTTPBaseURL is not
-// configured — works for typical deployments behind a single proxy/host.
-func (s *Handler) shareURLBase(r *http.Request) string {
+// publicBaseURLFor returns the absolute URL prefix for a link this server
+// hands out: a share URL, or the endpoint the MCP setup page tells people
+// to connect to. Falls back to deriving from the request when HTTPBaseURL
+// is not configured — works for typical deployments behind a single
+// proxy/host.
+func (s *Handler) publicBaseURLFor(r *http.Request) string {
 	// An operator-set HTTP_API_BASE_URL is authoritative: it is the
 	// canonical public URL, and it should win even when a caller reaches
 	// the server by some other name.
@@ -184,7 +186,7 @@ func (s *Handler) handleJobOutputShare(w http.ResponseWriter, r *http.Request, j
 		return
 	}
 
-	url := fmt.Sprintf("%s/api/v1/share/output?t=%s", s.shareURLBase(r), tok)
+	url := fmt.Sprintf("%s/api/v1/share/output?t=%s", s.publicBaseURLFor(r), tok)
 	s.writeJSON(w, http.StatusOK, ShareOutputResponse{
 		URL:        url,
 		ExpiresAt:  exp,
@@ -464,7 +466,7 @@ func (s *Handler) handleJobInputShare(w http.ResponseWriter, r *http.Request, jo
 		}
 		uploads = append(uploads, ShareInputUpload{
 			JobID:         s.jobPathID(ctx, cluster, proc),
-			URL:           fmt.Sprintf("%s/api/v1/share/input?t=%s", s.shareURLBase(r), tok),
+			URL:           fmt.Sprintf("%s/api/v1/share/input?t=%s", s.publicBaseURLFor(r), tok),
 			ExpectedFiles: htcondor.SpoolInputAllowSet(ad),
 		})
 	}

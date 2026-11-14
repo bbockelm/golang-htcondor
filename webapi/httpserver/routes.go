@@ -452,8 +452,16 @@ func (h *Handler) setupRoutes() {
 			sdk := h.mcpSDKHandler()
 			mcpHandler = func(w http.ResponseWriter, r *http.Request) { sdk.ServeHTTP(w, r) }
 		}
-		mux.HandleFunc(mcpPath, mcpHandler)
-		mux.HandleFunc(mcpMessagePath, mcpHandler)
+		// Fronted by the setup page, which answers the browser
+		// navigations this URL attracts -- it is the address a site
+		// hands a new user, so people follow it in a browser.
+		browserHelp := h.withMCPBrowserHelp(mcpHandler)
+		mux.Handle(mcpPath, browserHelp)
+		mux.Handle(mcpMessagePath, browserHelp)
+		mux.HandleFunc(mcpSetupPath, h.handleMCPSetupPage)
+		// {$} so this is /mcp/ alone and not a prefix: a wrong path
+		// under /mcp/ should still be reported wrong.
+		mux.HandleFunc(mcpPath+"/{$}", h.handleMCPTrailingSlash)
 
 		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp", "transport", transport)
 	}

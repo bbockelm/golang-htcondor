@@ -109,7 +109,7 @@ func (h *Handler) handleWatchShare(w http.ResponseWriter, r *http.Request, watch
 	}
 
 	h.writeJSON(w, http.StatusOK, ShareWatchResponse{
-		URL:                fmt.Sprintf("%s/api/v1/share/watch?t=%s", h.shareURLBase(r), tok),
+		URL:                fmt.Sprintf("%s/api/v1/share/watch?t=%s", h.publicBaseURLFor(r), tok),
 		WatchID:            watchID,
 		Owner:              owner,
 		ExpiresAt:          exp,
