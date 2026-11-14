@@ -1100,8 +1100,8 @@ describe('installing from a GitHub release', () => {
     expect(uploadSiteApp).not.toHaveBeenCalled();
   });
 
-  it('still installs when this browser cannot reach GitHub', async () => {
-    // A rate limit or a blocked api.github.com says nothing about
+  it('still installs when this page cannot ask GitHub', async () => {
+    // A rate limit, a proxy, or a content policy says nothing about
     // what the ACCESS POINT can fetch. The lists go away; the boxes
     // come back, and the install goes through the server as before.
     listSiteApps.mockResolvedValue(
