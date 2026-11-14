@@ -218,6 +218,15 @@ func newStubGitHub(t *testing.T, bundle []byte, sum string) *stubGitHub {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v2.3", Assets: assets})
 	})
+	// An older release, so a test can ask for a tag and tell the
+	// answer apart from "whatever is latest".
+	mux.HandleFunc("/repos/acme/demos/releases/tags/v1.9", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v1.9", Assets: []githubAsset{{
+			Name: "demos.zip", Size: int64(len(bundle)),
+			DownloadURL: s.server.URL + "/dl/demos.zip",
+		}}})
+	})
 	mux.HandleFunc("/dl/demos.zip", func(w http.ResponseWriter, _ *http.Request) {
 		s.hits++
 		_, _ = w.Write(bundle)
@@ -340,6 +349,35 @@ func TestSiteAppInstallFromGitHub(t *testing.T) {
 	e, _ := h.siteApps.Get("demos")
 	if e.App.Digest == "" {
 		t.Error("the app is published unattested although a checksum was verified and written")
+	}
+}
+
+// Naming a tag installs that release rather than the newest one, and
+// the tag named is what gets recorded. A site pinning a known-good
+// version depends on both halves.
+func TestSiteAppInstallFromANamedTag(t *testing.T) {
+	dir := t.TempDir()
+	bundle := uploadBundleZip(t, "Demos")
+	newStubGitHub(t, bundle, sha256Hex(bundle)+"  demos.zip\n")
+
+	h := githubServer(t, dir)
+	w := httptest.NewRecorder()
+	h.adminUploadSiteApp(w, githubInstallRequest(t, "demos", "acme/demos", "v1.9"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	ups, err := h.siteAppUploads.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 1 {
+		t.Fatalf("uploads = %+v, want one", ups)
+	}
+	// v2.3 is what /releases/latest answers; asking for v1.9 has to
+	// get v1.9 and say so.
+	if ups[0].SourceRef != "v1.9" {
+		t.Errorf("source ref = %q, want the tag that was asked for", ups[0].SourceRef)
 	}
 }
 
