@@ -1,0 +1,2 @@
+go test fuzz v1
+string("eXeCutABle=0\nrequestmemorY=0\nretrY_request_memorY=0\nrequestdisk=0,queue")
