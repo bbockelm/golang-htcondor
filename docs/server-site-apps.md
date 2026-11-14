@@ -162,10 +162,17 @@ be asked for is one that exists. Where a release attaches more than one
 which. Where it attaches none, it says so rather than letting the
 install start.
 
-If the browser cannot reach GitHub, which a rate limit or a proxy will
+If the browser cannot ask GitHub, which a rate limit or a proxy will
 do, the lists give way to boxes: type a tag, or leave it blank for the
-latest. That is a browser's limitation and not the access point's, and
-the install still goes through the server as it otherwise would.
+latest. That is the browser's limitation and not the access point's,
+and the install still goes through the server as it otherwise would.
+
+For those reads to be allowed at all, the server names
+`https://api.github.com` in the `connect-src` of its
+Content-Security-Policy, and only while this feature is on. A reverse
+proxy in front of the access point that writes its own policy has to
+carry that directive through, or the page will report that it could
+not ask GitHub on a network where it plainly could.
 
 What this does, in order: asks GitHub which release is meant, takes the
 release's only `.zip` (or the asset you name, where there is more than

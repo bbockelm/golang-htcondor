@@ -500,11 +500,16 @@ function describeRelease(r: Release): string {
 // name is being typed rather than after the install is attempted.
 //
 // The three ways this can fail are kept apart on purpose. A repository
-// that is not there is a typo, and saying so is useful. GitHub
-// rate-limiting or ignoring THIS BROWSER is not the administrator's
-// mistake and says nothing about what the access point can fetch, so
-// it reads as a note about the list being unavailable -- the boxes
-// still work, and the install still goes through the server.
+// that is not there is a typo, and saying so is useful. A question
+// this PAGE could not put to GitHub -- a rate limit, a proxy, or the
+// page's own content policy -- is not the administrator's mistake and
+// says nothing about what the access point can fetch, so it reads as
+// a note about the list being unavailable: the boxes still work, and
+// the install still goes through the server.
+//
+// It does not name a cause, because the page cannot tell them apart.
+// A fetch refused by CSP and a fetch refused by the network both
+// arrive here as the same TypeError.
 function RepoStatus({
   typed,
   slug,
@@ -531,7 +536,7 @@ function RepoStatus({
     return said(
       result.reason === 'rate-limited'
         ? 'GitHub is rate-limiting this browser, so its releases cannot be listed here. Type the tag; the access point fetches separately.'
-        : 'This browser could not reach GitHub, so its releases cannot be listed here. Type the tag; the access point fetches separately.',
+        : 'This page could not ask GitHub for the list. Type the tag; the access point fetches the bundle separately.',
       'text-amber-700',
     );
   }

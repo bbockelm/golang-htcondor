@@ -654,3 +654,48 @@ func TestResolveGitHubReleaseExplainsARateLimit(t *testing.T) {
 		t.Errorf("error = %v, want the rate limit named", err)
 	}
 }
+
+// The admin page reads api.github.com from the BROWSER -- to list a
+// repository's releases while one is being typed, and to notice that
+// an installed app's repository has published a new one. Both are
+// fetches off this origin, and the shipped policy has no connect-src
+// at all, so they fall back to default-src 'self' and Chrome refuses
+// them before a packet is sent.
+//
+// This is the bug that made both of those features look like a
+// network problem: the page reports that it could not reach GitHub,
+// which is true, and says nothing about the policy that stopped it.
+func TestSecurityPolicyLetsThePageReachGitHub(t *testing.T) {
+	csp := func(github bool) string {
+		s := brandingServer(t, func(c *Config) { c.SiteAppsGitHub = github })
+		return brandingGet(t, s, brandingPath).Header().Get("Content-Security-Policy")
+	}
+
+	on := csp(true)
+	if !strings.Contains(on, "connect-src 'self' https://api.github.com;") {
+		t.Errorf("a server that offers installing from a release does not let its page ask GitHub: %q", on)
+	}
+
+	// Named, not opened. A policy that permits any origin permits
+	// exfiltration to any origin, which is most of what a CSP on an
+	// authenticated page is for.
+	off := csp(false)
+	if !strings.Contains(off, "connect-src 'self';") {
+		t.Errorf("connect-src is missing, so it falls back to default-src: %q", off)
+	}
+	if strings.Contains(off, "github.com") {
+		t.Errorf("a server with the feature off still names GitHub: %q", off)
+	}
+
+	// Metadata only. The release asset is not served cross-origin by
+	// GitHub at any policy, which is why this server downloads it.
+	if strings.Contains(on, "githubusercontent") {
+		t.Errorf("the policy names the asset host, which the browser never fetches: %q", on)
+	}
+	// Nothing else moved.
+	for _, want := range []string{"default-src 'self';", "object-src 'none';", "base-uri 'self'"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("the rest of the policy changed: %q lacks %q", on, want)
+		}
+	}
+}
