@@ -52,6 +52,7 @@ import {
   parseRepoRef,
   rankRepoMatches,
   repoTermOf,
+  searchRepos,
   pickBundleAsset,
   releaseDiffers,
   repoSlug,
@@ -63,6 +64,11 @@ import {
 
 const TH = 'px-3 py-2';
 const TD = 'px-3 py-2 align-top';
+// How much of a name is worth a search. Search allows ten requests a
+// minute; one or two letters would spend them matching half the
+// account.
+const MIN_SEARCH = 3;
+
 const INPUT =
   'mt-1 w-full rounded-sm border border-gray-300 px-2 py-1 text-sm focus:border-brand-400 focus:outline-hidden focus:ring-1 focus:ring-brand-400';
 const BTN =
@@ -517,25 +523,38 @@ function RepoSuggestions({
   onPick,
   onHighlight,
   truncated,
+  searching,
+  fromSearch,
 }: {
   repos: RepoSummary[];
   term: string;
   highlight: number;
   onPick: (name: string) => void;
   onHighlight: (i: number) => void;
-  /** The account had a full page, so there may be more than was seen. */
+  /** The listing was a full page, the search is done, and neither matched. */
   truncated: boolean;
+  /** The listing matched nothing and the search is still out. */
+  searching: boolean;
+  /** These were found by searching, not in the account's first page. */
+  fromSearch: boolean;
 }) {
   if (repos.length === 0) {
-    // Nothing offered is not the same as nothing there. An account
-    // with more repositories than one page holds can easily have the
-    // right one outside it, and a silent empty list would read as
-    // this name being wrong.
+    if (searching) {
+      return (
+        <p className="-mt-2 text-xs text-gray-500" data-testid="repo-searching">
+          Looking through the rest of the account…
+        </p>
+      );
+    }
+    // Nothing offered is not the same as nothing there, and after a
+    // search has also come back empty it is worth saying which was
+    // asked -- a silent empty list would read as the name being
+    // wrong when it may be a search that could not be made.
     if (!truncated || term === '') return null;
     return (
       <p className="-mt-2 text-xs text-gray-500" data-testid="repo-suggestions-truncated">
-        Nothing matching among this account’s 100 most recently updated repositories. Type the
-        name in full if it is an older one.
+        No repository of this account has a name like that. Type it in full if you are sure;
+        this searches rather than guesses, and a search can be refused.
       </p>
     );
   }
@@ -545,6 +564,7 @@ function RepoSuggestions({
       role="listbox"
       className="-mt-2 divide-y divide-gray-100 rounded-sm border border-gray-200 bg-white"
       data-testid="repo-suggestions"
+      data-from-search={fromSearch ? 'true' : undefined}
     >
       {repos.map((r, i) => (
         <li key={r.name} role="option" aria-selected={i === highlight}>
@@ -845,8 +865,41 @@ function UploadForm({
   // offering to replace an answer that is already right.
   const term = from === 'github' ? repoTermOf(repo) : '';
   const settled = lookup.data?.ok === true;
-  const suggestions: RepoSummary[] =
+  const listed: RepoSummary[] =
     repoList.data?.ok && !settled ? rankRepoMatches(repoList.data.repos, term) : [];
+
+  // The fallback, for a name the listing cannot see. One page is a
+  // hundred repositories and an account may have hundreds, so a name
+  // outside the recently-pushed hundred is invisible to the listing
+  // however much of it is typed.
+  //
+  // Asked only when the cheap question came back truncated and
+  // matched nothing, and only once there is enough typed to be worth
+  // a request: search allows ten a minute. That is a separate bucket
+  // from the sixty an hour everything else here spends -- a search
+  // does not cost a release lookup -- but it is a small one, so it is
+  // kept for the question the listing could not answer.
+  const worthSearching =
+    repoList.data?.ok === true && repoList.data.truncated && listed.length === 0 && !settled;
+  const [searchTerm, setSearchTerm] = useState('');
+  useEffect(() => {
+    const want = worthSearching && term.length >= MIN_SEARCH ? term : '';
+    const t = setTimeout(() => setSearchTerm(want), want === '' ? 0 : 600);
+    return () => clearTimeout(t);
+  }, [worthSearching, term]);
+
+  const search = useQuery({
+    queryKey: ['github-repo-search', ownerSlug, searchTerm],
+    queryFn: ({ signal }) => searchRepos(ownerSlug, searchTerm, fetch, signal),
+    enabled: githubAllowed && from === 'github' && ownerSlug !== '' && searchTerm !== '',
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  const searched: RepoSummary[] =
+    worthSearching && search.data?.ok ? rankRepoMatches(search.data.repos, term) : [];
+
+  const suggestions = listed.length > 0 ? listed : searched;
+  const fromSearch = listed.length === 0 && searched.length > 0;
   // Which suggestion the keyboard is on, or -1 for none. Typing
   // clears it: the highlighted row was about the list that was on
   // screen, and more letters mean a different list.
@@ -1266,7 +1319,9 @@ function UploadForm({
             highlight={highlight}
             onPick={take}
             onHighlight={setHighlight}
-            truncated={(repoList.data?.ok && repoList.data.truncated && !settled) || false}
+            truncated={worthSearching && !search.isFetching && searched.length === 0}
+            searching={worthSearching && search.isFetching}
+            fromSearch={fromSearch}
           />
           <RepoStatus
             typed={repo}

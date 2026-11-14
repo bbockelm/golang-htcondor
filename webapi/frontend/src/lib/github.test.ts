@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   listRepos,
+  searchRepos,
   ownerOf,
   rankRepoMatches,
   repoTermOf,
@@ -509,5 +510,119 @@ describe('choosing which repositories to offer', () => {
   it('offers nothing for an empty term, rather than everything', () => {
     expect(rankRepoMatches([r('demos')], '')).toEqual([]);
     expect(rankRepoMatches([r('demos')], '   ')).toEqual([]);
+  });
+});
+
+describe('searching an account’s repositories by name', () => {
+  const found = (items: unknown[]) =>
+    (async () =>
+      ({ ok: true, status: 200, json: async () => ({ items }) }) as Response) as unknown as typeof fetch;
+
+  it('asks about names, within the one account', async () => {
+    const fetchImpl = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => ({ items: [] }) }) as Response,
+    ) as unknown as typeof fetch;
+    await searchRepos('bbockelm', 'autoscale', fetchImpl);
+    const [url] = (fetchImpl as unknown as { mock: { calls: [string][] } }).mock.calls[0];
+    expect(decodeURIComponent(url)).toContain('q=autoscale in:name user:bbockelm');
+    expect(url).toContain('per_page=5');
+  });
+
+  it('will not let the box rewrite the question', async () => {
+    // `q` is a little language. A term carrying its own qualifiers
+    // would be the typist asking about somebody else's account.
+    const fetchImpl = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => ({ items: [] }) }) as Response,
+    ) as unknown as typeof fetch;
+    await searchRepos('acme', 'demos user:someone-else fork:only', fetchImpl);
+    const [url] = (fetchImpl as unknown as { mock: { calls: [string][] } }).mock.calls[0];
+    const q = decodeURIComponent(url).split('q=')[1].split('&')[0];
+    // What was typed is cut at the first character a repository name
+    // could not have, so it searches for `demos` -- and the only
+    // qualifiers in the query are the ones this code wrote.
+    expect(q).toBe('demos in:name user:acme');
+    expect(q.match(/\w+:/g)).toEqual(['in:', 'user:']);
+  });
+
+  it('reads the results the way the listing is read', async () => {
+    const got = await searchRepos(
+      'bbockelm',
+      'autoscale',
+      found([
+        {
+          name: 'htcondor-autoscale-manager',
+          description: 'Scale a pool',
+          pushed_at: '2019-01-01T00:00:00Z',
+          archived: true,
+          fork: false,
+        },
+      ]),
+    );
+    expect(got).toEqual({
+      ok: true,
+      truncated: false,
+      repos: [
+        {
+          name: 'htcondor-autoscale-manager',
+          description: 'Scale a pool',
+          pushedAt: '2019-01-01T00:00:00Z',
+          archived: true,
+          fork: false,
+        },
+      ],
+    });
+  });
+
+  it('keeps its own rate limit apart from not answering', async () => {
+    // Ten a minute, and a separate bucket from the sixty an hour the
+    // listing spends: being refused here says nothing about the rest.
+    const answer = (status: number) =>
+      (async () =>
+        ({ ok: false, status, json: async () => ({}) }) as Response) as unknown as typeof fetch;
+    expect(await searchRepos('acme', 'demos', answer(403))).toEqual({
+      ok: false,
+      reason: 'rate-limited',
+    });
+    expect(await searchRepos('acme', 'demos', answer(422))).toEqual({
+      ok: false,
+      reason: 'unreachable',
+    });
+  });
+
+  it('does not ask at all without an account and something to look for', async () => {
+    const spy = vi.fn();
+    expect(await searchRepos('acme', '', spy as unknown as typeof fetch)).toEqual({
+      ok: false,
+      reason: 'no-owner',
+    });
+    expect(await searchRepos('-nope', 'demos', spy as unknown as typeof fetch)).toEqual({
+      ok: false,
+      reason: 'no-owner',
+    });
+    // A term that is nothing but punctuation is nothing to look for.
+    expect(await searchRepos('acme', '///', spy as unknown as typeof fetch)).toEqual({
+      ok: false,
+      reason: 'no-owner',
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('survives an answer that is not the shape it expects', async () => {
+    const odd = (body: unknown) =>
+      (async () =>
+        ({ ok: true, status: 200, json: async () => body }) as Response) as unknown as typeof fetch;
+    expect(await searchRepos('acme', 'demos', odd([]))).toEqual({
+      ok: false,
+      reason: 'unreachable',
+    });
+    expect(await searchRepos('acme', 'demos', odd({ items: 'no' }))).toEqual({
+      ok: false,
+      reason: 'unreachable',
+    });
+    expect(await searchRepos('acme', 'demos', found([{ no: 'name' }, 7]))).toEqual({
+      ok: true,
+      truncated: false,
+      repos: [],
+    });
   });
 });

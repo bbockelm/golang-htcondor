@@ -849,6 +849,7 @@ describe('installing from a GitHub release', () => {
       releases?: unknown[];
       latest?: unknown;
       repos?: unknown[];
+      found?: unknown[];
       status?: number;
       slowReleases?: number;
     } = {},
@@ -860,6 +861,11 @@ describe('installing from a GitHub release', () => {
         const u = String(url);
         asked.push(u);
         if (opts.status && opts.status !== 200) return { ok: false, status: opts.status };
+        if (u.includes('/search/repositories')) {
+          return opts.found
+            ? { ok: true, status: 200, json: async () => ({ items: opts.found }) }
+            : { ok: false, status: 403 };
+        }
         if (u.includes('/repos?')) {
           return opts.repos
             ? { ok: true, status: 200, json: async () => opts.repos }
@@ -1353,19 +1359,82 @@ describe('installing from a GitHub release', () => {
     expect(asked.find((u) => u.includes('/repos?'))).toContain('/users/acme/repos');
   });
 
-  it('says when a name may simply be outside the page it was shown', async () => {
-    // An account with more repositories than one page holds can have
-    // the right one outside it. A silent empty list would read as the
-    // name being wrong, which is the opposite of what is known.
+  it('searches the rest of the account for a name its first page did not have', async () => {
+    // One page is a hundred repositories and an account can have far
+    // more -- bbockelm has 251 -- so a name outside the recently
+    // pushed hundred is invisible to the listing however much of it
+    // is typed. This is the only thing search is spent on.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({
+      repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })),
+      found: [{ name: 'demos-from-2019', pushed_at: '2019-01-01T00:00:00Z' }],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+
+    expect(
+      await screen.findByTestId('repo-suggestion-demos-from-2019', {}, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    const q = asked.find((u) => u.includes('/search/repositories'));
+    expect(decodeURIComponent(q ?? '')).toContain('q=demos in:name user:acme');
+  });
+
+  it('does not search when the account’s own page already answered', async () => {
+    // Search allows ten requests a MINUTE. It is kept for the
+    // question the cheap listing could not answer.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({ repos: [{ name: 'demos' }], found: [{ name: 'demos' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demo' } });
+    await screen.findByTestId('repo-suggestion-demos');
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(asked.filter((u) => u.includes('/search/'))).toHaveLength(0);
+  });
+
+  it('does not search a complete account, or on one or two letters', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    // Under a full page: the listing WAS the account, so a miss is a
+    // real miss and there is nothing else to look in.
+    const short = stubGitHub({ repos: [{ name: 'unrelated' }], found: [{ name: 'demos' }] });
+    const first = renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(short.filter((u) => u.includes('/search/'))).toHaveLength(0);
+    first.unmount();
+
+    const long = stubGitHub({
+      repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })),
+      found: [{ name: 'demos' }],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/de' } });
+    // Past the listing's pause AND the search's, so a search that was
+    // going to be made has been made by now.
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(long.filter((u) => u.includes('/search/'))).toHaveLength(0);
+  });
+
+  it('says so when the search came back with nothing, or could not be made', async () => {
+    // A refused search and an account that truly has no such name
+    // look the same from here, so it says which question was asked
+    // rather than pronouncing the name wrong.
     listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
     stubGitHub({ repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })) });
     renderPage();
     await screen.findByTestId('upload-form');
     fireEvent.click(screen.getByTestId('from-github'));
     fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
-    expect(await screen.findByTestId('repo-suggestions-truncated')).toHaveTextContent(
-      'Type the name in full',
-    );
+    expect(
+      await screen.findByTestId('repo-suggestions-truncated', {}, { timeout: 3000 }),
+    ).toHaveTextContent('a search can be refused');
   });
 
   it('keeps quiet about a short account that simply has no match', async () => {

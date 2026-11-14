@@ -167,20 +167,87 @@ export async function listRepos(
     return { ok: false, reason: 'unreachable' };
   }
   if (!Array.isArray(body)) return { ok: false, reason: 'unreachable' };
-  const repos: RepoSummary[] = [];
-  for (const raw of body) {
-    if (typeof raw !== 'object' || raw === null) continue;
-    const r = raw as Record<string, unknown>;
-    if (typeof r.name !== 'string' || r.name === '') continue;
-    repos.push({
-      name: r.name,
-      description: typeof r.description === 'string' ? r.description : '',
-      pushedAt: typeof r.pushed_at === 'string' ? r.pushed_at : '',
-      archived: r.archived === true,
-      fork: r.fork === true,
-    });
-  }
+  const repos = body.map(readRepo).filter((r): r is RepoSummary => r !== null);
   return { ok: true, repos, truncated: body.length >= REPO_PAGE };
+}
+
+/**
+ * Search an account's repositories by name.
+ *
+ * The fallback for what listRepos cannot see. One page is a hundred
+ * repositories and an account can have far more -- bbockelm has 251 --
+ * so a name outside the recently-pushed hundred is invisible to the
+ * listing however much of it is typed. Search finds it.
+ *
+ * It is a fallback and not the first move because it is metered
+ * differently: TEN requests a minute, where the listing's budget is
+ * sixty an hour. Those are separate buckets, which is the saving
+ * grace -- a search spent here does not take a release lookup away --
+ * but ten a minute is still a budget to spend only on the question
+ * the cheap listing could not answer.
+ *
+ * The term is reduced to the characters a repository name may contain
+ * before it goes into the query. `q` is a little language, and
+ * letting `user:someone-else` or `fork:only` through from a text box
+ * would be letting the typist rewrite the question being asked.
+ */
+export async function searchRepos(
+  owner: string,
+  term: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<RepoListResult> {
+  // Cut at the first character a repository name could not contain,
+  // rather than deleting it: `demos user:someone-else` is a search
+  // for `demos`, not for the word `demosusersomeone-else`, which
+  // matches nothing and looks like the search being broken.
+  const safe = (/^[A-Za-z0-9._-]*/.exec(term.trim())?.[0] ?? '').slice(0, 100);
+  if (!OWNER.test(owner) || safe === '') return { ok: false, reason: 'no-owner' };
+  const q = encodeURIComponent(`${safe} in:name user:${owner}`);
+  let res: Response;
+  try {
+    res = await fetchImpl(`https://api.github.com/search/repositories?q=${q}&per_page=5`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      credentials: 'omit',
+      signal,
+    });
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (!res.ok) {
+    // 422 is a query this cannot ask -- an account name that is not
+    // one, say. It is not worth a different word to the reader than
+    // any other unanswered question.
+    if (res.status === 403 || res.status === 429) return { ok: false, reason: 'rate-limited' };
+    if (res.status === 404) return { ok: false, reason: 'no-owner' };
+    return { ok: false, reason: 'unreachable' };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (typeof body !== 'object' || body === null) return { ok: false, reason: 'unreachable' };
+  const items = (body as { items?: unknown }).items;
+  if (!Array.isArray(items)) return { ok: false, reason: 'unreachable' };
+  return { ok: true, repos: items.map(readRepo).filter((r): r is RepoSummary => r !== null), truncated: false };
+}
+
+// readRepo takes the fields a suggestion needs. The listing and the
+// search describe a repository the same way, so one reader serves
+// both -- and keeps them from drifting into describing it differently.
+function readRepo(raw: unknown): RepoSummary | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.name !== 'string' || r.name === '') return null;
+  return {
+    name: r.name,
+    description: typeof r.description === 'string' ? r.description : '',
+    pushedAt: typeof r.pushed_at === 'string' ? r.pushed_at : '',
+    archived: r.archived === true,
+    fork: r.fork === true,
+  };
 }
 
 /**

@@ -167,10 +167,15 @@ install start.
 
 The suggestions come from one listing of the account, its hundred most
 recently updated repositories, fetched once per account rather than
-once per keystroke. An older repository than that may not be offered,
-and the page says so rather than leaving an empty list to imply the
-name is wrong; typing it in full always works, because the release
-lookup addresses a repository exactly instead of searching for it.
+once per keystroke. Where that listing was a full page and nothing in
+it matched, the page then searches the rest of the account by name --
+only then, because GitHub meters search at ten requests a minute
+against a budget of its own. An account of a few dozen repositories
+never reaches that second question at all.
+
+Typing a repository in full always works whatever the suggestions
+show, because the release lookup addresses it exactly instead of
+searching for it.
 
 If the browser cannot ask GitHub, which a rate limit or a proxy will
 do, the lists give way to boxes: type a tag, or leave it blank for the
