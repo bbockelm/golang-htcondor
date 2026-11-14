@@ -1620,6 +1620,22 @@ export interface AdminSiteApp {
   // when a file was copied into the bundle directory.
   uploaded_by?: string;
   uploaded_at?: string;
+  // Where the bundle came from, for one this server fetched. Absent
+  // for a file that was attached: nothing about it says where it was
+  // built.
+  source?: AdminSiteAppSource;
+}
+
+// The release an app was installed from.
+export interface AdminSiteAppSource {
+  // How it was fetched. Only 'github' today.
+  kind: string;
+  // owner/name.
+  repo: string;
+  // The tag that was resolved when it was installed, never the word
+  // 'latest' -- that is what makes an update check possible.
+  ref?: string;
+  asset?: string;
 }
 
 // One of an app's configuration parameters, named as the
@@ -1653,6 +1669,10 @@ export interface AdminSiteAppConfig {
 export interface AdminSiteApps {
   enabled: boolean;
   upload_allowed: boolean;
+  // Whether this server will fetch a bundle from a GitHub release.
+  // False where the access point has no egress, so the page can leave
+  // out an action that would only ever fail.
+  github_allowed?: boolean;
   directory?: string;
   apps: AdminSiteApp[];
 }

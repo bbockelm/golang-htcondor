@@ -32,7 +32,8 @@ func TestSiteAppsConfigReadsEnvironmentOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	gotDir, gotReload, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
+	got := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
+	gotDir, gotReload := got.Dir, got.Reload
 
 	if gotDir != dir {
 		t.Errorf("dir = %q, want %q", gotDir, dir)
@@ -49,7 +50,7 @@ func TestSiteAppsConfigUnsetIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	if gotDir, _, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); gotDir != "" {
+	if gotDir := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)).Dir; gotDir != "" {
 		t.Errorf("dir = %q, want empty", gotDir)
 	}
 }
@@ -66,7 +67,7 @@ func TestSiteAppsConfigRejectsBadInterval(t *testing.T) {
 		if err != nil {
 			t.Fatalf("config.New: %v", err)
 		}
-		_, gotReload, _ := loadSiteAppsConfig(cfg, siteAppsTestLogger(t))
+		gotReload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)).Reload
 		if gotReload != 0 {
 			t.Errorf("interval %q produced %v, want 0 so the default applies", bad, gotReload)
 		}
@@ -83,7 +84,7 @@ func TestSiteAppUploadIsOffByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	if _, _, upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); upload {
+	if upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)).Upload; upload {
 		t.Error("upload is enabled without HTTP_API_SITE_APPS_UPLOAD")
 	}
 
@@ -92,7 +93,7 @@ func TestSiteAppUploadIsOffByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.New: %v", err)
 	}
-	if _, _, upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)); !upload {
+	if upload := loadSiteAppsConfig(cfg, siteAppsTestLogger(t)).Upload; !upload {
 		t.Error("HTTP_API_SITE_APPS_UPLOAD = true did not enable upload")
 	}
 }
@@ -118,7 +119,8 @@ func TestSiteAppsConfigSurvivesANilLogger(t *testing.T) {
 	}
 	// Every logging branch at once: the directory line, the bad-duration
 	// error, and the upload-enabled line.
-	gotDir, gotReload, gotUpload := loadSiteAppsConfig(cfg, nil)
+	got := loadSiteAppsConfig(cfg, nil)
+	gotDir, gotReload, gotUpload := got.Dir, got.Reload, got.Upload
 
 	if gotDir != dir {
 		t.Errorf("dir = %q, want %q", gotDir, dir)

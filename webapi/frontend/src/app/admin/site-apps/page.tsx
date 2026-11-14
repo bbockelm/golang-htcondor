@@ -40,8 +40,10 @@ import {
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
   EVERYONE,
+  latestRelease,
   nearestSiteAppID,
   parseGroupList,
+  releaseDiffers,
   validateSiteAppID,
 } from '@/lib/siteapps';
 
@@ -483,9 +485,11 @@ type Published = { id: string; version?: string; at?: string };
 
 function UploadForm({
   apps,
+  githubAllowed,
   onDone,
 }: {
   apps: AdminSiteApp[];
+  githubAllowed: boolean;
   onDone: (d: AdminSiteApps) => void;
 }) {
   // The apps this server may replace. One the configuration publishes
@@ -512,6 +516,13 @@ function UploadForm({
   const [groupsError, setGroupsError] = useState<string | null>(null);
   const [home, setHome] = useState(false);
   const [done, setDone] = useState<Published | null>(null);
+  // Where the bytes come from. A file is always possible; fetching
+  // from a release needs the server to have egress, which it reports.
+  const [from, setFrom] = useState<'file' | 'github'>('file');
+  const [repo, setRepo] = useState('');
+  const [ref, setRef] = useState('');
+  const [asset, setAsset] = useState('');
+  const [repoError, setRepoError] = useState<string | null>(null);
 
   const chosen = mode === 'update' ? updatable.find((a) => a.id === target) : undefined;
   const effectiveID = mode === 'update' ? target : id;
@@ -535,6 +546,23 @@ function UploadForm({
     setGroupsError(null);
     setError(null);
     setDone(null);
+    // An app that came from a release is updated from the same place
+    // nine times out of ten, so the repository and the asset are
+    // carried over and only the tag is left to say. The tag is NOT
+    // carried over: it is the one thing an update changes, and a
+    // prefilled old tag would reinstall what is already there.
+    const src = app?.source;
+    setRepoError(null);
+    setRef('');
+    if (src && githubAllowed) {
+      setFrom('github');
+      setRepo(src.repo);
+      setAsset(src.asset ?? '');
+    } else {
+      setFrom('file');
+      setRepo('');
+      setAsset('');
+    }
   }
 
   // The settings of whichever app is selected, including on the first
@@ -590,9 +618,15 @@ function UploadForm({
           everyone || named.length > 0
             ? null
             : 'Name at least one group that may see this app, or tick “everyone signed in”.';
+        // The server validates this too, and its answer is the one
+        // that counts; this is here so an empty box is not a round
+        // trip.
+        const repoProblem =
+          from === 'github' && repo.trim() === '' ? 'Name the repository as owner/name.' : null;
         setIDError(idProblem);
         setGroupsError(groupProblem);
-        if (idProblem || groupProblem) return;
+        setRepoError(repoProblem);
+        if (idProblem || groupProblem || repoProblem) return;
 
         setGroups(named);
         setPending('');
@@ -604,6 +638,7 @@ function UploadForm({
         // setting into it; an unchecked box in the DOM would quietly
         // clear it.
         data.set('home', home ? 'true' : 'false');
+        data.set('source', from);
         upload.mutate(data);
       }}
     >
@@ -756,17 +791,125 @@ function UploadForm({
           setGroupsError(null);
         }}
       />
-      <label className="block text-sm text-gray-700">
-        Bundle
-        <input
-          name="bundle"
-          type="file"
-          accept=".zip"
-          required
-          className={`${INPUT} file:mr-2 file:rounded-sm file:border-0 file:bg-gray-100 file:px-2 file:py-1 file:text-xs`}
-          data-testid="upload-bundle"
-        />
-      </label>
+      {/* Where the bytes come from. Offered only where the server
+          will actually fetch: on an access point with no egress the
+          choice would be between a file and a timeout. */}
+      {githubAllowed ? (
+        <fieldset className="text-sm text-gray-700">
+          <legend className="sr-only">Where the bundle comes from</legend>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="from"
+                value="file"
+                checked={from === 'file'}
+                data-testid="from-file"
+                onChange={() => {
+                  setFrom('file');
+                  setRepoError(null);
+                }}
+              />
+              Attach a file
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="from"
+                value="github"
+                checked={from === 'github'}
+                data-testid="from-github"
+                onChange={() => {
+                  setFrom('github');
+                  setError(null);
+                }}
+              />
+              From a GitHub release
+            </label>
+          </div>
+        </fieldset>
+      ) : null}
+
+      {from === 'github' && githubAllowed ? (
+        <div className="space-y-3" data-testid="github-fields">
+          <label className="block text-sm text-gray-700">
+            Repository
+            <input
+              name="repo"
+              type="text"
+              value={repo}
+              placeholder="owner/name"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className={INPUT}
+              data-testid="upload-repo"
+              onChange={(e) => {
+                setRepo(e.target.value);
+                setRepoError(null);
+              }}
+            />
+          </label>
+          {repoError ? (
+            <p className="text-sm text-red-600" data-testid="upload-repo-error">
+              {repoError}
+            </p>
+          ) : null}
+          <label className="block text-sm text-gray-700">
+            Release
+            <input
+              name="ref"
+              type="text"
+              value={ref}
+              placeholder="latest"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className={INPUT}
+              data-testid="upload-ref"
+              onChange={(e) => setRef(e.target.value)}
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              A tag such as <Code>v1.2.0</Code>. Blank takes the latest release, and the tag it
+              resolves to is what gets recorded.
+            </span>
+          </label>
+          <label className="block text-sm text-gray-700">
+            Asset
+            <input
+              name="asset"
+              type="text"
+              value={asset}
+              placeholder="the release's only .zip"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className={INPUT}
+              data-testid="upload-asset"
+              onChange={(e) => setAsset(e.target.value)}
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Only needed where a release attaches more than one bundle. A <Code>.sha256</Code>{' '}
+              published beside it is checked before anything is served.
+            </span>
+          </label>
+          <p className="text-xs text-gray-500">
+            The repository must be public: this fetches without credentials.
+          </p>
+        </div>
+      ) : (
+        <label className="block text-sm text-gray-700">
+          Bundle
+          <input
+            name="bundle"
+            type="file"
+            accept=".zip"
+            required
+            className={`${INPUT} file:mr-2 file:rounded-sm file:border-0 file:bg-gray-100 file:px-2 file:py-1 file:text-xs`}
+            data-testid="upload-bundle"
+          />
+        </label>
+      )}
       <label className="flex items-center gap-2 text-sm text-gray-700">
         <input
           name="home"
@@ -785,8 +928,9 @@ function UploadForm({
       ) : null}
       {upload.isPending ? (
         <p className="text-sm text-gray-600" data-testid="upload-busy">
-          Publishing {effectiveID.trim()}… the bundle is being stored and the directory
-          rescanned.
+          {from === 'github'
+            ? `Fetching ${repo.trim()} and publishing ${effectiveID.trim()}…`
+            : `Publishing ${effectiveID.trim()}… the bundle is being stored and the directory rescanned.`}
         </p>
       ) : null}
       {done && !upload.isPending ? (
@@ -928,7 +1072,11 @@ export default function AdminSiteAppsPage() {
       )}
 
       {data.upload_allowed ? (
-        <UploadForm apps={data.apps} onDone={(d) => qc.setQueryData(['admin', 'site-apps'], d)} />
+        <UploadForm
+          apps={data.apps}
+          githubAllowed={data.github_allowed ?? false}
+          onDone={(d) => qc.setQueryData(['admin', 'site-apps'], d)}
+        />
       ) : (
         <div
           className="max-w-xl rounded-lg border border-gray-200 bg-gray-50 p-4"
@@ -945,6 +1093,46 @@ export default function AdminSiteAppsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * "There is a newer release" for an app installed from one.
+ *
+ * Asked of GitHub by the browser. The access point is not made to poll
+ * every repository it ever installed from -- that would be a standing
+ * outbound request on a schedule, for a convenience -- and it does not
+ * need to be: api.github.com answers cross-origin, so the page can ask
+ * for itself, once per repository, while it is open.
+ *
+ * Silent on every failure. A rate-limited or unreachable GitHub means
+ * no badge; it must not put an error on a page that is otherwise
+ * correct.
+ */
+function UpdateBadge({ app }: { app: AdminSiteApp }) {
+  const repo = app.source?.repo;
+  const { data } = useQuery({
+    queryKey: ['site-app-release', repo],
+    queryFn: () => latestRelease(repo as string),
+    enabled: Boolean(repo),
+    // Releases are not published by the minute, and an unauthenticated
+    // caller gets 60 requests an hour from this address -- shared with
+    // every other tab the viewer has open.
+    staleTime: 10 * 60 * 1000,
+    retry: false,
+  });
+  if (!repo || !data || !releaseDiffers(app.source?.ref, data.tag)) return null;
+  return (
+    <a
+      href={data.url}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      data-testid={`update-${app.id}`}
+      className="mt-0.5 inline-block rounded-sm border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-xs text-amber-900 hover:bg-amber-100"
+    >
+      {data.tag} is the current release
+    </a>
   );
 }
 
@@ -992,6 +1180,22 @@ function AppRows({
               published {formatWhen(a.uploaded_at)}
             </div>
           ) : null}
+          {a.source ? (
+            <div className="mt-0.5 text-xs text-gray-500" data-testid={`source-${a.id}`}>
+              from{' '}
+              <a
+                href={`https://github.com/${a.source.repo}`}
+                target="_blank"
+                rel="noreferrer"
+                className="hover:underline"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {a.source.repo}
+              </a>
+              {a.source.ref ? ` at ${a.source.ref}` : ''}
+            </div>
+          ) : null}
+          <UpdateBadge app={a} />
         </td>
         <td className={TD}>
           {visibleTo(a.groups)}

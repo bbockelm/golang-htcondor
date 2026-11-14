@@ -1761,7 +1761,12 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 // read only in the normal path is silently absent there -- which is how
 // the browser harness came to deploy a bundle the demo server never
 // looked at.
-func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, time.Duration, bool) {
+//
+// A struct rather than a tuple because two of the fields are booleans:
+// positionally, `(dir, reload, upload, github)` and
+// `(dir, reload, github, upload)` are the same type, and transposing
+// them would compile, pass, and quietly turn a grant off or on.
+func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) siteAppsSettings {
 	// A directory of <id>.zip bundles, each with an <id>.yaml policy
 	// file beside it naming the groups that may see it. Unset leaves
 	// the feature out of the server entirely.
@@ -1792,7 +1797,21 @@ func loadSiteAppsConfig(cfg *config.Config, logger *logging.Logger) (string, tim
 		logger.Info(logging.DestinationHTTP,
 			"Site app upload is enabled; administrators may publish bundles through the web interface", "dir", dir)
 	}
-	return dir, reload, upload
+	// Whether a bundle may be fetched from a GitHub release instead of
+	// attached. On by default: it publishes nothing the upload grant
+	// above does not already allow, and the reason to turn it off is
+	// an access point with no egress, where the alternative is a
+	// button that only ever times out.
+	github := cfg.GetBool("HTTP_API_SITE_APPS_GITHUB", true)
+	return siteAppsSettings{Dir: dir, Reload: reload, Upload: upload, GitHub: github}
+}
+
+// siteAppsSettings is what the configuration says about site apps.
+type siteAppsSettings struct {
+	Dir    string
+	Reload time.Duration
+	Upload bool
+	GitHub bool
 }
 
 func loadConfigWithDefaults() (*config.Config, error) {
@@ -2323,7 +2342,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 	// this one reports what it found and the logger does not exist
 	// until now. A directory that is configured and not being scanned
 	// is otherwise silent, which is the whole reason it says so.
-	siteAppsDir, siteAppsReload, siteAppsUpload := loadSiteAppsConfig(cfg, logger)
+	siteApps := loadSiteAppsConfig(cfg, logger)
 
 	// Create collector
 	collector := setupCollector(cfg, logger)
@@ -2595,9 +2614,10 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		WebUIAdminGroup:            webuiAdminGroup,
 		WebUIAccessGroup:           webuiAccessGroup,
 		WebUIAppOnlyGroup:          webuiAppOnlyGroup,
-		SiteAppsDir:                siteAppsDir,
-		SiteAppsReloadInterval:     siteAppsReload,
-		SiteAppsUpload:             siteAppsUpload,
+		SiteAppsDir:                siteApps.Dir,
+		SiteAppsReloadInterval:     siteApps.Reload,
+		SiteAppsUpload:             siteApps.Upload,
+		SiteAppsGitHub:             siteApps.GitHub,
 		WebUISiteName:              webuiSiteName,
 		WebUISiteTagline:           webuiSiteTagline,
 		WebUIFooterLogos:           webuiFooterLogos,
@@ -2894,7 +2914,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 	// _CONDOR_<PARAM> environment overrides last, so a harness can
 	// point a throwaway demo server at a bundle directory without
 	// writing a configuration file.
-	demoSiteAppsDir, demoSiteAppsReload, demoSiteAppsUpload := loadSiteAppsConfig(cfg, logger)
+	demoSiteApps := loadSiteAppsConfig(cfg, logger)
 	demoAppOnlyGroup, _ := cfg.Get("HTTP_API_WEBUI_APP_ONLY_GROUP")
 
 	// Start condor_master
@@ -3053,9 +3073,10 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 		// Site apps are honoured in demo mode too, so a site can try a
 		// bundle against a throwaway server and so the browser tests
 		// have something to drive.
-		SiteAppsDir:            demoSiteAppsDir,
-		SiteAppsReloadInterval: demoSiteAppsReload,
-		SiteAppsUpload:         demoSiteAppsUpload,
+		SiteAppsDir:            demoSiteApps.Dir,
+		SiteAppsReloadInterval: demoSiteApps.Reload,
+		SiteAppsUpload:         demoSiteApps.Upload,
+		SiteAppsGitHub:         demoSiteApps.GitHub,
 		WebUIAppOnlyGroup:      demoAppOnlyGroup,
 		// With a placementd: an account with no access, to show the
 		// request-access flow, and the identity map that sends it there.

@@ -82,6 +82,10 @@ type AdminSiteApp struct {
 	URL string `json:"url"`
 	// SizeBytes is the bundle file's size; 0 for a directory bundle.
 	SizeBytes int64 `json:"size_bytes,omitempty"`
+	// Source is where the bundle came from, for one this server
+	// fetched. Absent for a bundle handed over as bytes: nothing about
+	// a file picked from a laptop says where it was built.
+	Source *AdminSiteAppSource `json:"source,omitempty"`
 	// UploadedBy and UploadedAt are who published this bundle through
 	// the web interface and when. Absent for an app the configuration
 	// publishes: nothing records when a file was copied into the
@@ -91,12 +95,31 @@ type AdminSiteApp struct {
 	UploadedAt *time.Time `json:"uploaded_at,omitempty"`
 }
 
+// AdminSiteAppSource is the release an app was installed from.
+//
+// Ref is the tag that was resolved at install time, never the word
+// "latest": the admin page compares it against the repository's
+// current release to decide whether an update exists, and a ref that
+// meant "whatever is newest" would always compare equal.
+type AdminSiteAppSource struct {
+	// Kind is how it was fetched. Only "github" today; present so a
+	// second kind does not have to change the shape the page reads.
+	Kind  string `json:"kind"`
+	Repo  string `json:"repo"`
+	Ref   string `json:"ref,omitempty"`
+	Asset string `json:"asset,omitempty"`
+}
+
 // AdminSiteAppsResponse is GET /api/v1/admin/site-apps.
 type AdminSiteAppsResponse struct {
 	// Enabled is whether site apps are configured at all.
 	Enabled bool `json:"enabled"`
 	// UploadAllowed is whether this server accepts uploaded bundles.
 	UploadAllowed bool `json:"upload_allowed"`
+	// GitHubAllowed is whether this server will fetch a bundle from a
+	// GitHub release. False where the access point has no egress, so
+	// the page can leave out an action that would only ever fail.
+	GitHubAllowed bool `json:"github_allowed"`
 	// Directory is where bundles live, so an administrator who cannot
 	// upload knows where to put one.
 	Directory string         `json:"directory,omitempty"`
@@ -180,6 +203,7 @@ func (s *Handler) adminListSiteApps(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Enabled = true
 	resp.UploadAllowed = s.siteAppUploadAllowed()
+	resp.GitHubAllowed = s.siteAppGitHubAllowed()
 	resp.Directory = s.siteApps.Dir()
 	// Who published each uploaded bundle, and when. Read once here
 	// rather than per app, and a failure costs the attribution rather
@@ -208,6 +232,12 @@ func (s *Handler) adminListSiteApps(w http.ResponseWriter, r *http.Request) {
 		if u, ok := uploads[e.App.ID]; ok && app.Managed {
 			at := u.UploadedAt
 			app.UploadedBy, app.UploadedAt = u.UploadedBy, &at
+			if u.SourceRepo != "" {
+				app.Source = &AdminSiteAppSource{
+					Kind: "github", Repo: u.SourceRepo,
+					Ref: u.SourceRef, Asset: u.SourceAsset,
+				}
+			}
 		}
 		resp.Apps = append(resp.Apps, app)
 	}
@@ -245,6 +275,18 @@ func (s *Handler) adminSiteAppHistory(w http.ResponseWriter, r *http.Request, id
 // siteAppUploadAllowed reports whether this server accepts uploads.
 func (s *Handler) siteAppUploadAllowed() bool {
 	return s.siteApps != nil && s.siteAppUploads != nil && s.siteAppUpload
+}
+
+// siteAppGitHubAllowed reports whether this server will fetch a bundle
+// from a GitHub release.
+//
+// Installing from a release publishes code the same way uploading a
+// file does, so it sits behind the same grant rather than a second
+// one. The separate switch is about egress, not authority: an access
+// point with no route to the internet should not be offered a button
+// that can only time out.
+func (s *Handler) siteAppGitHubAllowed() bool {
+	return s.siteAppUploadAllowed() && s.siteAppGitHub
 }
 
 // adminUploadSiteApp publishes a bundle sent through the web interface.
@@ -306,21 +348,23 @@ func (s *Handler) adminUploadSiteApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, header, err := r.FormFile("bundle")
+	src, status, err := s.openBundleSource(r)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Attach the bundle as the 'bundle' field")
+		s.writeError(w, status, err.Error())
 		return
 	}
-	defer func() { _ = file.Close() }()
-	if header.Size > maxSiteAppBundleBytes {
-		s.writeError(w, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("The bundle is larger than %d bytes", int64(maxSiteAppBundleBytes)))
-		return
-	}
+	defer func() { _ = src.Body.Close() }()
 
-	digest, size, err := s.writeUploadedBundle(id, file)
+	digest, size, err := s.writeUploadedBundle(id, src.Body, src.Expect)
 	if err != nil {
 		s.logger.Error(logging.DestinationHTTP, "site app upload", "app", id, "error", err)
+		// A digest that does not match is the caller's news, not an
+		// internal fault: it says the bytes are not the ones that were
+		// published, which is the whole reason the checksum is there.
+		if errors.Is(err, errBundleDigestMismatch) {
+			s.writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, "Could not store the bundle")
 		return
 	}
@@ -338,6 +382,7 @@ func (s *Handler) adminUploadSiteApp(w http.ResponseWriter, r *http.Request) {
 		Icon:        strings.TrimSpace(r.FormValue("icon")),
 		UploadedBy:  by, UploadedAt: time.Now(),
 		Digest: digest, SizeBytes: size,
+		SourceRepo: src.Repo, SourceRef: src.Ref, SourceAsset: src.Asset,
 	}
 	if err := s.siteAppUploads.Put(r.Context(), up); err != nil {
 		s.logger.Error(logging.DestinationHTTP, "site app upload", "app", id, "error", err)
@@ -349,11 +394,16 @@ func (s *Handler) adminUploadSiteApp(w http.ResponseWriter, r *http.Request) {
 	// who it was granted to.
 	s.logger.Info(logging.DestinationHTTP, "Site app uploaded",
 		"app", id, "by", by, "groups", strings.Join(groups, ","),
-		"digest", digest, "bytes", size)
+		"digest", digest, "bytes", size,
+		"source", src.Describe())
 
 	s.logSiteAppReload(s.siteApps.Reload())
 	s.adminListSiteApps(w, r)
 }
+
+// errBundleDigestMismatch is returned when the bytes that arrived are
+// not the ones the checksum names.
+var errBundleDigestMismatch = errors.New("bundle does not match its checksum")
 
 // writeUploadedBundle stores the bundle as <id>.zip, atomically.
 //
@@ -361,7 +411,20 @@ func (s *Handler) adminUploadSiteApp(w http.ResponseWriter, r *http.Request) {
 // the target, because the loader is reading that directory on its own
 // schedule: a partially-written <id>.zip is an archive that opens and
 // serves half an app.
-func (s *Handler) writeUploadedBundle(id string, src io.Reader) (digest string, size int64, err error) {
+//
+// expect, when set, is the SHA-256 the bundle must hash to. It is
+// checked BEFORE the rename, so a bundle that fails never becomes the
+// file an app is served from.
+//
+// The <id>.zip.sha256 sidecar is maintained here too, and the order is
+// deliberate: the old sidecar is removed first, the bundle is renamed
+// into place second, the new sidecar is written last. Every
+// intermediate state is then a bundle with no checksum beside it,
+// which the loader serves unattested -- whereas writing the sidecar
+// first would leave a window where the checksum names a bundle that is
+// not there yet, and the loader REFUSES that pairing and withdraws the
+// app.
+func (s *Handler) writeUploadedBundle(id string, src io.Reader, expect string) (digest string, size int64, err error) {
 	dir := s.siteApps.Dir()
 	tmp, err := os.CreateTemp(dir, ".upload-*")
 	if err != nil {
@@ -391,8 +454,22 @@ func (s *Handler) writeUploadedBundle(id string, src io.Reader) (digest string, 
 	if err = os.Chmod(tmpName, 0o600); err != nil {
 		return "", 0, err
 	}
+	digest = hex.EncodeToString(h.Sum(nil))
+	if expect != "" && digest != expect {
+		err = fmt.Errorf("%w: it hashes to %s, but its .sha256 says %s",
+			errBundleDigestMismatch, digest, expect)
+		return "", 0, err
+	}
 	target, err := bundlePath(dir, id)
 	if err != nil {
+		return "", 0, err
+	}
+	// Any sidecar already there describes the bundle being replaced.
+	// Left in place it would be checked against the new one, they
+	// would disagree, and the loader would withdraw an app that is
+	// perfectly good.
+	sidecar := target + ".sha256"
+	if err = os.Remove(sidecar); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: as below
 		return "", 0, err
 	}
 	// G703: target comes from bundlePath, which rejects any id
@@ -402,7 +479,40 @@ func (s *Handler) writeUploadedBundle(id string, src io.Reader) (digest string, 
 	if err = os.Rename(tmpName, target); err != nil { //nolint:gosec // G703: see above
 		return "", 0, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), size, nil
+	if expect != "" {
+		// Past the point of no return: the bundle is published and
+		// verified. A sidecar that cannot be written costs the
+		// attestation badge, not the app, so it is logged rather than
+		// returned.
+		if werr := writeDigestSidecar(dir, sidecar, expect, filepath.Base(target)); werr != nil {
+			s.logger.Warn(logging.DestinationHTTP, "site app checksum not recorded",
+				"app", id, "error", werr)
+		}
+	}
+	return digest, size, nil
+}
+
+// writeDigestSidecar writes <id>.zip.sha256 atomically, in the format
+// shasum and sha256sum produce.
+func writeDigestSidecar(dir, path, digest, name string) error {
+	tmp, err := os.CreateTemp(dir, ".sha256-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := fmt.Fprintf(tmp, "%s  %s\n", digest, name); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	//nolint:gosec // G703: path is target+".sha256", and target came from bundlePath.
+	return os.Rename(tmpName, path)
 }
 
 // adminWithdrawSiteApp removes an uploaded app.
