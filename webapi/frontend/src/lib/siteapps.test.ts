@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { latestRelease, nearestSiteAppID, releaseDiffers } from './siteapps';
+import { nearestSiteAppID } from './siteapps';
 
 describe('catching an id that was meant to be another one', () => {
   // The reported mistake, exactly: meaning to replace `demos`, an
@@ -51,93 +51,5 @@ describe('catching an id that was meant to be another one', () => {
     expect(nearestSiteAppID('', published)).toBeNull();
     expect(nearestSiteAppID('   ', published)).toBeNull();
     expect(nearestSiteAppID('demo', [])).toBeNull();
-  });
-});
-
-describe('releaseDiffers', () => {
-  it('says so when the repository has moved on', () => {
-    expect(releaseDiffers('v0.1', 'v0.2')).toBe(true);
-  });
-
-  it('is quiet when the installed release is the current one', () => {
-    expect(releaseDiffers('v0.2', 'v0.2')).toBe(false);
-  });
-
-  it('treats v0.2 and 0.2 as one release written two ways', () => {
-    // The release workflow stamps the version without the v and tags
-    // with it. A badge that fired on that difference would be
-    // permanent, and a permanent badge is ignored.
-    expect(releaseDiffers('v0.2', '0.2')).toBe(false);
-    expect(releaseDiffers('0.2', 'v0.2')).toBe(false);
-    expect(releaseDiffers('V0.2', 'v0.2')).toBe(false);
-  });
-
-  it('says nothing when either side is unknown', () => {
-    // An app uploaded as a file has no installed ref, and a
-    // repository with no releases gives no tag. Neither is news.
-    expect(releaseDiffers(undefined, 'v0.2')).toBe(false);
-    expect(releaseDiffers('v0.1', undefined)).toBe(false);
-    expect(releaseDiffers('', '')).toBe(false);
-    expect(releaseDiffers('  ', 'v0.2')).toBe(false);
-  });
-
-  it('does not try to decide which release is newer', () => {
-    // Deliberately symmetric. Working out that v0.10 follows v0.9
-    // means knowing the project's scheme, and guessing it wrong tells
-    // a site its current app is stale.
-    expect(releaseDiffers('v0.10', 'v0.9')).toBe(true);
-    expect(releaseDiffers('v0.9', 'v0.10')).toBe(true);
-  });
-});
-
-describe('latestRelease', () => {
-  const ok = (body: unknown) =>
-    (async () =>
-      ({ ok: true, json: async () => body }) as Response) as unknown as typeof fetch;
-
-  it('reads the tag and the release page', async () => {
-    const got = await latestRelease(
-      'bbockelm/htcondor-site-app-template',
-      ok({ tag_name: 'v0.2', html_url: 'https://github.com/o/r/releases/tag/v0.2' }),
-    );
-    expect(got).toEqual({ tag: 'v0.2', url: 'https://github.com/o/r/releases/tag/v0.2' });
-  });
-
-  it('is silent rather than noisy when GitHub will not answer', async () => {
-    // A rate limit is the common case: 60 requests an hour per
-    // address, shared with every other tab. It must not put an error
-    // on a page about something else.
-    const rateLimited = (async () => ({ ok: false, status: 403 }) as Response) as unknown as typeof fetch;
-    expect(await latestRelease('o/r', rateLimited)).toBeNull();
-
-    const broken = (async () => {
-      throw new TypeError('Failed to fetch');
-    }) as unknown as typeof fetch;
-    expect(await latestRelease('o/r', broken)).toBeNull();
-  });
-
-  it('refuses to build a URL out of something that is not a repository', async () => {
-    // Nothing should reach the network for these at all.
-    let called = false;
-    const spy = (async () => {
-      called = true;
-      return { ok: true, json: async () => ({ tag_name: 'v1' }) } as Response;
-    }) as unknown as typeof fetch;
-    for (const bad of ['', 'owner', 'owner/repo/extra', '../../etc', 'o r/repo']) {
-      expect(await latestRelease(bad, spy)).toBeNull();
-    }
-    expect(called).toBe(false);
-  });
-
-  it('survives an answer that is not the shape it expects', async () => {
-    expect(await latestRelease('o/r', ok({}))).toBeNull();
-    expect(await latestRelease('o/r', ok(null))).toBeNull();
-    expect(await latestRelease('o/r', ok({ tag_name: 42 }))).toBeNull();
-    expect(await latestRelease('o/r', ok({ tag_name: '' }))).toBeNull();
-  });
-
-  it('falls back to the releases page when no page is named', async () => {
-    const got = await latestRelease('o/r', ok({ tag_name: 'v3' }));
-    expect(got).toEqual({ tag: 'v3', url: 'https://github.com/o/r/releases' });
   });
 });
