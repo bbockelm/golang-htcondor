@@ -1778,3 +1778,30 @@ nowhere there: `check()` skips any file one side rejected.
 What is deliberately left: the rest of `transferinput`. A java job's entry
 class and its `jar_files` are appended to the input list by condor_submit and
 by nothing here.
+
+## TransformOnEvict order follows the disk spelling
+
+`TransformOnEvict` lists the two built-in on-evict transforms in the order
+`SetBuiltInOnEvictCheck` appended them, and that order turns on how the submit
+file spelled the disk request — not on the order the file writes the commands
+in, and not on how it spelled the memory request. `SetRequestResources` walks
+the submit macro set for keys carrying the `request_` prefix and dispatches
+each as it goes, so `request_disk` is set during the walk, ahead of memory
+either way. `RequestDisk`, the job attribute's own name and the request's
+second spelling, carries no such prefix, misses the walk, and is set once
+memory has already appended its tag. Go ran disk first unconditionally, which
+matched on every file that spells the request `request_disk` and inverted the
+list on every file that uses the alias.
+
+Measured over both spellings of each request, in both file orders, for the
+`request_disk = a,b` and `retry_request_disk` forms, and pinned by
+`TestEvictTransformOrderFollowsTheDiskSpelling`.
+
+What is deliberately left: `request_disk` written with an EMPTY value
+alongside a `RequestDisk` that has one. condor_submit gives that file no disk
+on-evict transform at all, where this parser reads the value from the alias and
+builds one, so the two disagree about whether `RequestDisk` belongs in the list
+rather than about where in it. That is a question about `submit_param`'s
+handling of a present-but-empty keyword with an alias, which every aliased
+keyword shares, and it is not what the ordering fix is about. The fuzzer has
+not reached it.

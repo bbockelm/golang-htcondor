@@ -2149,28 +2149,25 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 		}
 	}
 
-	// Disk before memory, which is the order condor_submit reaches them
-	// in: SetRequestResources walks the submit macro set, and that table
-	// is kept sorted, so request_disk is seen before request_memory
-	// whatever order the file writes them in. The fallback pass for
-	// keywords the file does not name has them in that relative order
-	// too. It shows in TransformOnEvict, which both can append to.
 	// Disk in KiB. Same rule with a KiB base: request_disk = 10GB is
 	// RequestDisk = 10485760.
-	if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
-		if err := sf.setRequestDisk(ad, v, true); err != nil {
-			return err
+	setDisk := func() error {
+		if v, ok := sf.simpleKeywordParam("request_disk", "RequestDisk"); ok {
+			if err := sf.setRequestDisk(ad, v, true); err != nil {
+				return err
+			}
+		} else if v, ok := sf.requestDefault("request_disk"); ok {
+			// Same cluster-pass rule as memory: a later proc ad chains to
+			// proc 0's, so RequestDisk is already there and condor_submit
+			// reads neither the default nor retry_request_disk.
+			if err := sf.setRequestDisk(ad, v, proc == 0); err != nil {
+				return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
+			}
+			if e, ok := ad.Lookup("RequestDisk"); ok {
+				sf.defaultDisk = e.String()
+			}
 		}
-	} else if v, ok := sf.requestDefault("request_disk"); ok {
-		// Same cluster-pass rule as memory: a later proc ad chains to
-		// proc 0's, so RequestDisk is already there and condor_submit
-		// reads neither the default nor retry_request_disk.
-		if err := sf.setRequestDisk(ad, v, proc == 0); err != nil {
-			return fmt.Errorf("JOB_DEFAULT_REQUESTDISK: %w", err)
-		}
-		if e, ok := ad.Lookup("RequestDisk"); ok {
-			sf.defaultDisk = e.String()
-		}
+		return nil
 	}
 
 	// Memory in MiB. A bare number is already in MiB; a K/M/G/T suffix
@@ -2182,24 +2179,55 @@ func (sf *SubmitFile) setResourceRequests(ad *classad.ClassAd, proc int) error {
 	// and its siblings), which condor_submit reads only once it has a
 	// size to grow from. The VM branch deliberately does not: its
 	// request is an expression, so there is nothing to grow.
-	if v, ok := sf.simpleKeywordParam("request_memory", "RequestMemory"); ok {
-		if err := sf.setRequestMemory(ad, v, true); err != nil {
-			return err
+	setMemory := func() error {
+		if v, ok := sf.simpleKeywordParam("request_memory", "RequestMemory"); ok {
+			if err := sf.setRequestMemory(ad, v, true); err != nil {
+				return err
+			}
+		} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
+			_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.JobVMMemory")
+		} else if v, ok := sf.requestDefault("request_memory"); ok {
+			// The configured default reaches the retry family on the first
+			// proc only. condor_submit chains every later proc's ad to proc
+			// 0's, so RequestMemory is already there and SetRequestMem takes
+			// its "we already have a value" branch, which reads neither the
+			// default nor the retry commands.
+			if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
+				return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
+			}
+			if e, ok := ad.Lookup("RequestMemory"); ok {
+				sf.defaultMemory = e.String()
+			}
 		}
-	} else if _, vm := sf.submitCommand("vm_memory"); vm && sf.universe == UniverseVM {
-		_ = setExprAttr(ad, "RequestMemory", "request_memory", "MY.JobVMMemory")
-	} else if v, ok := sf.requestDefault("request_memory"); ok {
-		// The configured default reaches the retry family on the first
-		// proc only. condor_submit chains every later proc's ad to proc
-		// 0's, so RequestMemory is already there and SetRequestMem takes
-		// its "we already have a value" branch, which reads neither the
-		// default nor the retry commands.
-		if err := sf.setRequestMemory(ad, v, proc == 0); err != nil {
-			return fmt.Errorf("JOB_DEFAULT_REQUESTMEMORY: %w", err)
-		}
-		if e, ok := ad.Lookup("RequestMemory"); ok {
-			sf.defaultMemory = e.String()
-		}
+		return nil
+	}
+
+	// Which of the two runs first shows in TransformOnEvict, the list
+	// both append their tag to, and it turns on how the file SPELLED the
+	// disk request -- not on the order the file writes the two commands
+	// in, and not on how it spelled the memory request.
+	//
+	// condor_submit reaches a request two ways. SetRequestResources
+	// walks the submit macro set for keys with the "request_" prefix and
+	// dispatches each as it goes; keys without that prefix miss the walk
+	// and are handled after it. So request_disk (any case) is set during
+	// the walk, ahead of memory either way, while the RequestDisk alias
+	// is set after memory has already appended its tag.
+	//
+	// Measured against the oracle over both spellings of each request,
+	// in both file orders, for the "a,b" and retry_request_* forms.
+	//
+	// The test is macro-set presence, which is what the walk tests.
+	_, diskTakesTheWalk := sf.assignedCommand("request_disk")
+	first, second := setMemory, setDisk
+	if diskTakesTheWalk {
+		first, second = setDisk, setMemory
+	}
+	if err := first(); err != nil {
+		return err
+	}
+	if err := second(); err != nil {
+		return err
 	}
 
 	// GPUs. HTCondor ships no default, so a job that names none asks for
