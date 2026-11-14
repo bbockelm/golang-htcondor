@@ -150,8 +150,22 @@ published and what has been, and says where to put a bundle.
 
 A bundle published as a release asset can be fetched by the access
 point instead of attached by hand. On the publish form, choose **From a
-GitHub release** and give the repository as `owner/name`; leave the
-release blank for the latest, or name a tag.
+GitHub release** and give the repository as `owner/name` -- or paste
+its URL, which is what you have if the repository is open in another
+tab.
+
+The page reads the repository as you type it. It says whether GitHub
+has it, lists the releases it has published to choose from, and names
+the bundle it found in the one you chose, so the only release that can
+be asked for is one that exists. Where a release attaches more than one
+`.zip` -- the one case the access point refuses to guess at -- it asks
+which. Where it attaches none, it says so rather than letting the
+install start.
+
+If the browser cannot reach GitHub, which a rate limit or a proxy will
+do, the lists give way to boxes: type a tag, or leave it blank for the
+latest. That is a browser's limitation and not the access point's, and
+the install still goes through the server as it otherwise would.
 
 What this does, in order: asks GitHub which release is meant, takes the
 release's only `.zip` (or the asset you name, where there is more than

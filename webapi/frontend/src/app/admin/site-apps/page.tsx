@@ -28,7 +28,7 @@
 // change for such an id rather than letting either look like it
 // worked.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
@@ -40,12 +40,21 @@ import {
 import { ConfirmButton } from '@/components/ConfirmButton';
 import {
   EVERYONE,
-  latestRelease,
   nearestSiteAppID,
   parseGroupList,
-  releaseDiffers,
   validateSiteAppID,
 } from '@/lib/siteapps';
+import {
+  latestRelease,
+  listReleases,
+  parseRepoRef,
+  pickBundleAsset,
+  releaseDiffers,
+  repoSlug,
+  type AssetChoice,
+  type Release,
+  type ReleasesResult,
+} from '@/lib/github';
 
 const TH = 'px-3 py-2';
 const TD = 'px-3 py-2 align-top';
@@ -476,6 +485,147 @@ function GroupsField({
   );
 }
 
+// describeRelease is how one release reads in the list: its tag,
+// its title where that says something the tag does not, and a word
+// for a pre-release. The tag comes first because the tag is what gets
+// installed and recorded.
+function describeRelease(r: Release): string {
+  const parts = [r.tag];
+  if (r.name && r.name !== r.tag) parts.push(`— ${r.name}`);
+  if (r.prerelease) parts.push('(pre-release)');
+  return parts.join(' ');
+}
+
+// RepoStatus is the answer to "is this a repository?", shown while the
+// name is being typed rather than after the install is attempted.
+//
+// The three ways this can fail are kept apart on purpose. A repository
+// that is not there is a typo, and saying so is useful. GitHub
+// rate-limiting or ignoring THIS BROWSER is not the administrator's
+// mistake and says nothing about what the access point can fetch, so
+// it reads as a note about the list being unavailable -- the boxes
+// still work, and the install still goes through the server.
+function RepoStatus({
+  typed,
+  slug,
+  looking,
+  result,
+}: {
+  typed: string;
+  slug: string;
+  looking: boolean;
+  result?: ReleasesResult;
+}) {
+  const said = (text: string, tone: string) => (
+    <p className={`text-xs ${tone}`} data-testid="repo-status">
+      {text}
+    </p>
+  );
+  if (typed.trim() === '') return null;
+  if (slug === '') return said('Write it as owner/name.', 'text-gray-500');
+  if (looking || !result) return said(`Looking for ${slug} on GitHub…`, 'text-gray-500');
+  if (!result.ok) {
+    if (result.reason === 'no-repo') {
+      return said(`GitHub has no public repository called ${slug}.`, 'text-red-600');
+    }
+    return said(
+      result.reason === 'rate-limited'
+        ? 'GitHub is rate-limiting this browser, so its releases cannot be listed here. Type the tag; the access point fetches separately.'
+        : 'This browser could not reach GitHub, so its releases cannot be listed here. Type the tag; the access point fetches separately.',
+      'text-amber-700',
+    );
+  }
+  if (result.releases.length === 0) {
+    return said(`${slug} is there, but has not published a release.`, 'text-red-600');
+  }
+  const n = result.releases.length;
+  return said(`${slug} — ${n} release${n === 1 ? '' : 's'}.`, 'text-green-700');
+}
+
+// AssetField asks which bundle only where the release leaves a choice.
+//
+// A release with one .zip is the ordinary case and there is nothing to
+// ask about it; saying which file was found is reassurance, not a
+// question. Two bundles is the case the server refuses to guess at, so
+// it becomes a list. None at all is a release that cannot be
+// installed, which is worth saying before the attempt.
+function AssetField({
+  choice,
+  asset,
+  onAsset,
+  known,
+}: {
+  choice: AssetChoice | null;
+  asset: string;
+  onAsset: (v: string) => void;
+  known: boolean;
+}) {
+  // No listing: the server will pick, as it always did, and the name
+  // stays typeable for the release that attaches more than one.
+  if (!known || !choice) {
+    return (
+      <label className="block text-sm text-gray-700">
+        Asset
+        <input
+          name="asset"
+          type="text"
+          value={asset}
+          placeholder="the release's only .zip"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          className={INPUT}
+          data-testid="upload-asset"
+          onChange={(e) => onAsset(e.target.value)}
+        />
+        <span className="mt-1 block text-xs text-gray-500">
+          Only needed where a release attaches more than one bundle. A <Code>.sha256</Code>{' '}
+          published beside it is checked before anything is served.
+        </span>
+      </label>
+    );
+  }
+  if (choice.ok) {
+    return (
+      <p className="text-xs text-gray-500" data-testid="asset-note">
+        {choice.asset}
+        {choice.attested
+          ? ' — its checksum is published beside it and is checked before anything is served.'
+          : ' — no checksum is published beside it, so it arrives unattested.'}
+      </p>
+    );
+  }
+  if (choice.choices.length === 0) {
+    return (
+      <p className="text-sm text-red-600" data-testid="asset-problem">
+        {choice.problem}
+      </p>
+    );
+  }
+  return (
+    <label className="block text-sm text-gray-700">
+      Bundle
+      <select
+        name="asset"
+        value={asset}
+        className={INPUT}
+        data-testid="upload-asset"
+        onChange={(e) => onAsset(e.target.value)}
+      >
+        <option value="">Choose the bundle to install…</option>
+        {choice.choices.map((name) => (
+          <option key={name} value={name}>
+            {name}
+          </option>
+        ))}
+      </select>
+      <span className="mt-1 block text-xs text-gray-500" data-testid="asset-problem">
+        {choice.problem}
+      </span>
+    </label>
+  );
+}
+
 // published is what to say after an upload: which version is now
 // being served and when it was published. Re-publishing an app that is
 // already in the table changes nothing else visible about the row, so
@@ -523,6 +673,66 @@ function UploadForm({
   const [ref, setRef] = useState('');
   const [asset, setAsset] = useState('');
   const [repoError, setRepoError] = useState<string | null>(null);
+
+  // What GitHub says about the repository being typed.
+  //
+  // Asked from the browser, as the badge is, and for the same reason:
+  // api.github.com answers cross-origin. Asking it turns three boxes
+  // an administrator had to get right from memory into one box and two
+  // lists -- and, far more to the point, moves the moment a mistyped
+  // repository is reported from after the install attempt to while it
+  // is still being typed.
+  //
+  // The repository is debounced before it becomes a request. An
+  // unauthenticated caller gets 60 an hour from this address, and a
+  // request per keystroke would spend them on prefixes of the name.
+  const [slug, setSlug] = useState('');
+  useEffect(() => {
+    const parsed = parseRepoRef(repo);
+    const next = parsed ? repoSlug(parsed) : '';
+    // Clearing is immediate; asking waits. Nothing is spent on
+    // clearing, and a stale answer under a half-deleted name reads as
+    // an answer about what is there now.
+    const t = setTimeout(() => setSlug(next), next === '' ? 0 : 400);
+    return () => clearTimeout(t);
+  }, [repo]);
+
+  const lookup = useQuery({
+    queryKey: ['github-releases', slug],
+    queryFn: ({ signal }) => {
+      const parsed = parseRepoRef(slug);
+      if (!parsed) return Promise.resolve({ ok: false, reason: 'no-repo' } as const);
+      return listReleases(parsed, fetch, signal);
+    },
+    enabled: githubAllowed && from === 'github' && slug !== '',
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // Releases to choose from, or null where GitHub did not answer --
+  // which is NOT the same as a repository that has published none.
+  const releases: Release[] | null = lookup.data?.ok ? lookup.data.releases : null;
+  const chosenRelease = releases?.find((r) => r.tag === ref) ?? releases?.[0];
+
+  // Which release is actually meant. Where the list is known it holds
+  // one of its own: a tag carried over from a previous install, or
+  // none at all, reads as the newest -- which is what an update
+  // almost always means, and is now something that can be stated
+  // exactly rather than left to the word "latest" to resolve
+  // elsewhere. Derived rather than written back into the box, so that
+  // the list arriving does not cause a second render to correct it.
+  const effectiveRef = chosenRelease ? chosenRelease.tag : ref;
+
+  // An asset name carried over from the app's provenance is a hint,
+  // not a setting: a release that does not have that file is one
+  // where the hint is simply wrong, and honouring it would report a
+  // mismatch about a choice nobody made for this release.
+  const assetHere = chosenRelease?.assets.some((a) => a.name === asset) ?? false;
+  const effectiveAsset = assetHere ? asset : '';
+
+  // Which bundle the chosen release offers. The server picks again
+  // from its own copy of the release and its answer is the one that
+  // counts; this is the same rule, asked early enough to be useful.
+  const choice = chosenRelease ? pickBundleAsset(chosenRelease, effectiveAsset) : null;
 
   const chosen = mode === 'update' ? updatable.find((a) => a.id === target) : undefined;
   const effectiveID = mode === 'update' ? target : id;
@@ -575,6 +785,27 @@ function UploadForm({
     loadFrom(chosen);
   }
 
+  // Why this cannot be installed yet, in the order the form asks for
+  // it. Everything here is also checked by the server; the point of
+  // saying it twice is that this half can say it before a minute is
+  // spent fetching something that was never going to work.
+  function githubProblem(): string | null {
+    if (repo.trim() === '') return 'Name the repository as owner/name.';
+    if (!parseRepoRef(repo)) {
+      return 'Write the repository as owner/name, for example bbockelm/htcondor-site-app-template.';
+    }
+    // Only a listing that came back is allowed to refuse. GitHub
+    // rate-limiting or ignoring THIS BROWSER says nothing about what
+    // the access point can fetch, and must not block an install that
+    // would have worked.
+    if (lookup.data && !lookup.data.ok) {
+      return lookup.data.reason === 'no-repo' ? `GitHub has no public repository called ${slug}.` : null;
+    }
+    if (releases && releases.length === 0) return `${slug} has not published a release.`;
+    if (choice && !choice.ok) return choice.problem;
+    return null;
+  }
+
   const upload = useMutation({
     mutationFn: (form: FormData) => api.admin.uploadSiteApp(form),
     onSuccess: (d, form) => {
@@ -621,8 +852,7 @@ function UploadForm({
         // The server validates this too, and its answer is the one
         // that counts; this is here so an empty box is not a round
         // trip.
-        const repoProblem =
-          from === 'github' && repo.trim() === '' ? 'Name the repository as owner/name.' : null;
+        const repoProblem = from !== 'github' ? null : githubProblem();
         setIDError(idProblem);
         setGroupsError(groupProblem);
         setRepoError(repoProblem);
@@ -639,6 +869,13 @@ function UploadForm({
         // clear it.
         data.set('home', home ? 'true' : 'false');
         data.set('source', from);
+        if (from === 'github') data.set('ref', effectiveRef);
+        if (from === 'github' && choice?.ok) {
+          // Name the asset that was shown, rather than leaving the
+          // server to pick again from a release that may have gained
+          // a second bundle since this page read it.
+          data.set('asset', choice.asset);
+        }
         upload.mutate(data);
       }}
     >
@@ -850,49 +1087,74 @@ function UploadForm({
               }}
             />
           </label>
+          <RepoStatus
+            typed={repo}
+            slug={slug}
+            looking={lookup.isFetching}
+            result={lookup.data}
+          />
           {repoError ? (
             <p className="text-sm text-red-600" data-testid="upload-repo-error">
               {repoError}
             </p>
           ) : null}
+
+          {/* The release. A list of what the repository actually
+              published, where GitHub answered; the box it used to be
+              otherwise, because a browser that cannot reach GitHub is
+              not a reason to refuse an install the server can make. */}
           <label className="block text-sm text-gray-700">
             Release
-            <input
-              name="ref"
-              type="text"
-              value={ref}
-              placeholder="latest"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className={INPUT}
-              data-testid="upload-ref"
-              onChange={(e) => setRef(e.target.value)}
-            />
-            <span className="mt-1 block text-xs text-gray-500">
-              A tag such as <Code>v1.2.0</Code>. Blank takes the latest release, and the tag it
-              resolves to is what gets recorded.
-            </span>
+            {releases && releases.length > 0 ? (
+              <select
+                name="ref"
+                value={effectiveRef}
+                className={INPUT}
+                data-testid="upload-ref"
+                onChange={(e) => setRef(e.target.value)}
+              >
+                {releases.map((r) => (
+                  <option key={r.tag} value={r.tag}>
+                    {describeRelease(r)}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                name="ref"
+                type="text"
+                value={ref}
+                placeholder="latest"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className={INPUT}
+                data-testid="upload-ref"
+                onChange={(e) => setRef(e.target.value)}
+              />
+            )}
+            {releases && releases.length > 0 ? null : (
+              <span className="mt-1 block text-xs text-gray-500">
+                A tag such as <Code>v1.2.0</Code>. Blank takes the latest release, and the tag it
+                resolves to is what gets recorded.
+              </span>
+            )}
           </label>
-          <label className="block text-sm text-gray-700">
-            Asset
-            <input
-              name="asset"
-              type="text"
-              value={asset}
-              placeholder="the release's only .zip"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className={INPUT}
-              data-testid="upload-asset"
-              onChange={(e) => setAsset(e.target.value)}
-            />
-            <span className="mt-1 block text-xs text-gray-500">
-              Only needed where a release attaches more than one bundle. A <Code>.sha256</Code>{' '}
-              published beside it is checked before anything is served.
-            </span>
-          </label>
+
+          {/* The bundle. Named only where the release leaves a real
+              choice: one .zip is not a question to ask, and asking it
+              anyway is how an administrator ends up typing a file
+              name they have to go and look up. */}
+          <AssetField
+            choice={choice}
+            asset={effectiveAsset}
+            onAsset={(v) => {
+              setAsset(v);
+              setRepoError(null);
+            }}
+            known={releases !== null}
+          />
+
           <p className="text-xs text-gray-500">
             The repository must be public: this fetches without credentials.
           </p>

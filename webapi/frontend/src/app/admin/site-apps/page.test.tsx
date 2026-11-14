@@ -831,26 +831,48 @@ describe('installing from a GitHub release', () => {
     },
   });
 
-  function releasesReturn(tag: string) {
+  // A release as GitHub reports one, cut down to what is read.
+  const release = (tag: string, assets: string[] = ['demos.zip', 'demos.zip.sha256']) => ({
+    tag_name: tag,
+    name: tag,
+    prerelease: false,
+    published_at: '2026-11-14T12:00:00Z',
+    html_url: `https://github.com/o/r/releases/tag/${tag}`,
+    assets: assets.map((name) => ({ name, size: 4096 })),
+  });
+
+  // GitHub, answering the two questions this page asks it: what has
+  // this repository released, and what is its current release. Both
+  // go to api.github.com, so one stub routes on the path.
+  function stubGitHub(opts: { releases?: unknown[]; latest?: unknown; status?: number } = {}) {
+    const asked: string[] = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          tag_name: tag,
-          html_url: `https://github.com/o/r/releases/tag/${tag}`,
-        }),
-      })),
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        asked.push(u);
+        if (opts.status && opts.status !== 200) return { ok: false, status: opts.status };
+        if (u.includes('/releases/latest')) {
+          return opts.latest
+            ? { ok: true, status: 200, json: async () => opts.latest }
+            : { ok: false, status: 404 };
+        }
+        return opts.releases
+          ? { ok: true, status: 200, json: async () => opts.releases }
+          : { ok: false, status: 404 };
+      }),
     );
+    return asked;
+  }
+
+  function releasesReturn(tag: string) {
+    stubGitHub({ latest: { tag_name: tag, html_url: `https://github.com/o/r/releases/tag/${tag}` } });
   }
 
   beforeEach(() => {
     // No release information unless a test asks for it, so a page
     // that is not about the badge does not reach the network.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({ ok: false, status: 404 })),
-    );
+    stubGitHub();
   });
 
   it('offers to fetch from a release only where the server will', async () => {
@@ -888,10 +910,13 @@ describe('installing from a GitHub release', () => {
     uploadSiteApp.mockResolvedValue(
       listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
     );
+    stubGitHub({ releases: [release('v0.2'), release('v0.1')] });
     renderPage();
     await screen.findByTestId('upload-form');
     fireEvent.click(screen.getByTestId('from-github'));
-    fireEvent.change(screen.getByTestId('upload-ref'), { target: { value: 'v0.2' } });
+    // The repository came from the app's provenance, so the releases
+    // are listed without anything being typed.
+    await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v0.2'));
     fireEvent.click(screen.getByTestId('upload-submit'));
 
     await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
@@ -900,6 +925,10 @@ describe('installing from a GitHub release', () => {
     expect(sent.get('repo')).toBe('bbockelm/htcondor-site-app-template');
     expect(sent.get('ref')).toBe('v0.2');
     expect(sent.get('id')).toBe('demos');
+    // The bundle was resolved from the release rather than typed, and
+    // goes up by name so the server is not left to pick again from a
+    // release that may have gained a second one since.
+    expect(sent.get('asset')).toBe('demos.zip');
   });
 
   it('carries the repository into an update but never the tag', async () => {
@@ -923,6 +952,195 @@ describe('installing from a GitHub release', () => {
     fireEvent.click(screen.getByTestId('upload-submit'));
     expect(await screen.findByTestId('upload-repo-error')).toBeInTheDocument();
     expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('says what GitHub said about the repository, while it is being typed', async () => {
+    // The whole point: the answer arrives without a button being
+    // pressed, so a mistyped name is caught before a minute is spent
+    // fetching something that was never going to work.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ releases: [release('v1.9'), release('v1.8')] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('repo-status')).toHaveTextContent('acme/demos — 2 releases'),
+    );
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('refuses a repository GitHub does not have, without being submitted', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub();
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/nope' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('repo-status')).toHaveTextContent('no public repository'),
+    );
+    // And it is a refusal, not only a remark: there is nothing to
+    // fetch, so the install does not go to the server to find out.
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    expect(await screen.findByTestId('upload-repo-error')).toHaveTextContent(
+      'no public repository called acme/nope',
+    );
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('offers the releases as a list, newest first', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({
+      releases: [
+        { ...release('v2.0'), name: 'Second', prerelease: true },
+        release('v1.9'),
+      ],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() => expect(screen.getByTestId('upload-ref').tagName).toBe('SELECT'));
+    const tags = Array.from(
+      screen.getByTestId('upload-ref').querySelectorAll('option'),
+    ).map((o) => o.textContent);
+    expect(tags).toEqual(['v2.0 — Second (pre-release)', 'v1.9']);
+    // GitHub lists newest first and that order is kept, so the box
+    // opens on the release an update almost always means.
+    expect(screen.getByTestId('upload-ref')).toHaveValue('v2.0');
+  });
+
+  it('does not ask which bundle when the release attaches one', async () => {
+    // Asking anyway is how an administrator ends up typing a file
+    // name they have to go and look up.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ releases: [release('v1.9')] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() => expect(screen.getByTestId('asset-note')).toBeInTheDocument());
+    expect(screen.getByTestId('asset-note')).toHaveTextContent('demos.zip');
+    expect(screen.getByTestId('asset-note')).toHaveTextContent('checksum is published');
+    expect(screen.queryByTestId('upload-asset')).toBeNull();
+  });
+
+  it('says so when the one bundle arrives with no checksum', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ releases: [release('v1.9', ['demos.zip'])] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('asset-note')).toHaveTextContent('unattested'),
+    );
+  });
+
+  it('asks which bundle only when the release attaches more than one', async () => {
+    // An app whose provenance does not name an asset, so the release
+    // is the only thing that can answer which bundle is meant.
+    const vague = { ...installed, source: { ...installed.source!, asset: undefined } };
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [vague] }),
+    );
+    stubGitHub({ releases: [release('v1.9', ['demos.zip', 'tools.zip'])] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    await waitFor(() => expect(screen.getByTestId('upload-asset').tagName).toBe('SELECT'));
+    const names = Array.from(
+      screen.getByTestId('upload-asset').querySelectorAll('option'),
+    ).map((o) => o.getAttribute('value'));
+    expect(names).toEqual(['', 'demos.zip', 'tools.zip']);
+
+    // Until one is chosen there is nothing to install, and guessing
+    // would put the wrong app under the name chosen for the other.
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    expect(await screen.findByTestId('upload-repo-error')).toHaveTextContent('more than one');
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+
+    uploadSiteApp.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    fireEvent.change(screen.getByTestId('upload-asset'), { target: { value: 'tools.zip' } });
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
+    expect((uploadSiteApp.mock.calls[0][0] as FormData).get('asset')).toBe('tools.zip');
+  });
+
+  it('keeps the bundle an app was installed from, where the release still has it', async () => {
+    // Two bundles is only a question where nobody has answered it. An
+    // app installed from demos.zip is updated from demos.zip, and
+    // asking again every time the repository adds a second file would
+    // be asking about a decision already on record.
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    stubGitHub({ releases: [release('v1.9', ['demos.zip', 'demos.zip.sha256', 'tools.zip'])] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    await waitFor(() => expect(screen.getByTestId('asset-note')).toHaveTextContent('demos.zip'));
+    expect(screen.queryByTestId('upload-asset')).toBeNull();
+  });
+
+  it('refuses a release with no bundle attached to it', async () => {
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    stubGitHub({ releases: [release('v1.9', ['notes.txt'])] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    await waitFor(() =>
+      expect(screen.getByTestId('asset-problem')).toHaveTextContent('no .zip'),
+    );
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    expect(await screen.findByTestId('upload-repo-error')).toBeInTheDocument();
+    expect(uploadSiteApp).not.toHaveBeenCalled();
+  });
+
+  it('still installs when this browser cannot reach GitHub', async () => {
+    // A rate limit or a blocked api.github.com says nothing about
+    // what the ACCESS POINT can fetch. The lists go away; the boxes
+    // come back, and the install goes through the server as before.
+    listSiteApps.mockResolvedValue(
+      listing({ upload_allowed: true, github_allowed: true, apps: [installed] }),
+    );
+    uploadSiteApp.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ status: 403 });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    await waitFor(() =>
+      expect(screen.getByTestId('repo-status')).toHaveTextContent('rate-limiting'),
+    );
+    expect(screen.getByTestId('upload-ref').tagName).toBe('INPUT');
+    fireEvent.change(screen.getByTestId('upload-ref'), { target: { value: 'v0.2' } });
+    fireEvent.click(screen.getByTestId('upload-submit'));
+    await waitFor(() => expect(uploadSiteApp).toHaveBeenCalled());
+    expect((uploadSiteApp.mock.calls[0][0] as FormData).get('ref')).toBe('v0.2');
+  });
+
+  it('does not ask GitHub once per keystroke', async () => {
+    // 60 requests an hour, per address, shared with every other tab
+    // the viewer has open: a request per prefix of the name would
+    // spend them on names nobody meant to type.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({ releases: [release('v1.9')] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    // Typed at a pace a person types at: each of these is a whole
+    // repository name as far as the parser is concerned, and the
+    // gaps are real, so nothing here coalesces for being in one
+    // synchronous burst.
+    for (const typed of ['a/b', 'a/bc', 'ac/bc', 'acme/d', 'acme/de', 'acme/demos']) {
+      fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: typed } });
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v1.9'));
+    expect(asked.filter((u) => u.includes('/releases'))).toHaveLength(1);
   });
 
   it('says where an installed app came from', async () => {
