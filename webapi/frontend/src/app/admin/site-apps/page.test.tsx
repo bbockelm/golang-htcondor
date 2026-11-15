@@ -844,7 +844,16 @@ describe('installing from a GitHub release', () => {
   // GitHub, answering the two questions this page asks it: what has
   // this repository released, and what is its current release. Both
   // go to api.github.com, so one stub routes on the path.
-  function stubGitHub(opts: { releases?: unknown[]; latest?: unknown; status?: number } = {}) {
+  function stubGitHub(
+    opts: {
+      releases?: unknown[];
+      latest?: unknown;
+      repos?: unknown[];
+      found?: unknown[];
+      status?: number;
+      slowReleases?: number;
+    } = {},
+  ) {
     const asked: string[] = [];
     vi.stubGlobal(
       'fetch',
@@ -852,6 +861,26 @@ describe('installing from a GitHub release', () => {
         const u = String(url);
         asked.push(u);
         if (opts.status && opts.status !== 200) return { ok: false, status: opts.status };
+        if (u.includes('/search/repositories')) {
+          return opts.found
+            ? { ok: true, status: 200, json: async () => ({ items: opts.found }) }
+            : { ok: false, status: 403 };
+        }
+        if (u.includes('/repos?')) {
+          return opts.repos
+            ? { ok: true, status: 200, json: async () => opts.repos }
+            : { ok: false, status: 404 };
+        }
+        // A half-typed name is not a repository, and GitHub answers
+        // 404 for one. A stub that served releases for any name at
+        // all would hide the very state the suggestions are for.
+        const named = /\/repos\/[^/]+\/([^/?]+)/.exec(u)?.[1];
+        if (opts.repos && !opts.repos.some((r) => (r as { name: string }).name === named)) {
+          return { ok: false, status: 404 };
+        }
+        if (opts.slowReleases && u.includes('/releases')) {
+          await new Promise((r) => setTimeout(r, opts.slowReleases));
+        }
         if (u.includes('/releases/latest')) {
           return opts.latest
             ? { ok: true, status: 200, json: async () => opts.latest }
@@ -1141,6 +1170,286 @@ describe('installing from a GitHub release', () => {
     }
     await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v1.9'));
     expect(asked.filter((u) => u.includes('/releases'))).toHaveLength(1);
+  });
+
+  it('offers the account’s repositories once some of the name is typed', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({
+      repos: [
+        { name: 'htcondor-site-app-template', description: 'A starting point' },
+        { name: 'old-htcondor-helper' },
+        { name: 'unrelated' },
+      ],
+      releases: [release('v0.1')],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+
+    // Nothing to offer before the slash: `bbockelm` could as easily
+    // be the first half of a repository name.
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'bbockelm' } });
+    await new Promise((r) => setTimeout(r, 450));
+    expect(screen.queryByTestId('repo-suggestions')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'bbockelm/htc' } });
+    const list = await screen.findByTestId('repo-suggestions');
+    const offered = Array.from(list.querySelectorAll('[data-testid^="repo-suggestion-"]')).map(
+      (b) => b.getAttribute('data-testid'),
+    );
+    // The one whose name STARTS with what was typed comes first, and
+    // the one that matches nothing is not offered at all.
+    expect(offered).toEqual([
+      'repo-suggestion-htcondor-site-app-template',
+      'repo-suggestion-old-htcondor-helper',
+    ]);
+    expect(list).toHaveTextContent('A starting point');
+  });
+
+  it('fills the box from a suggestion, and goes on to its releases', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({
+      repos: [{ name: 'htcondor-site-app-template' }],
+      releases: [release('v0.1')],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'bbockelm/htc' } });
+    fireEvent.mouseDown(
+      await screen.findByTestId('repo-suggestion-htcondor-site-app-template'),
+    );
+    expect(screen.getByTestId('upload-repo')).toHaveValue(
+      'bbockelm/htcondor-site-app-template',
+    );
+    await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v0.1'));
+  });
+
+  it('takes the keyboard, because a type-ahead that needs the mouse is slower than typing', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: [{ name: 'demos-one' }, { name: 'demos-two' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    const box = screen.getByTestId('upload-repo');
+    fireEvent.change(box, { target: { value: 'acme/demos' } });
+    await screen.findByTestId('repo-suggestions');
+
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(box).toHaveValue('acme/demos-two');
+  });
+
+  it('leaves Enter alone until an arrow key has picked something out', async () => {
+    // Enter in this box means what it means in every other box on the
+    // form -- submit -- and a type-ahead that swallows it whenever a
+    // list happens to be open takes that away. fireEvent returns
+    // false when the handler called preventDefault, which is exactly
+    // the question.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: [{ name: 'demos-one' }, { name: 'demos-two' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    const box = screen.getByTestId('upload-repo');
+    fireEvent.change(box, { target: { value: 'acme/demos' } });
+    await screen.findByTestId('repo-suggestions');
+
+    expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(true);
+    expect(box).toHaveValue('acme/demos');
+
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(false);
+    expect(box).toHaveValue('acme/demos-one');
+  });
+
+  it('drops what was picked out when more is typed', async () => {
+    // The highlighted row is about the list that was on screen. More
+    // letters mean a different list, and Enter must not reach into
+    // the new one at the old position.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: [{ name: 'demos-one' }, { name: 'demos-two' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    const box = screen.getByTestId('upload-repo');
+    fireEvent.change(box, { target: { value: 'acme/demos' } });
+    await screen.findByTestId('repo-suggestions');
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    fireEvent.change(box, { target: { value: 'acme/demos-' } });
+    await screen.findByTestId('repo-suggestions');
+    expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(true);
+    expect(box).toHaveValue('acme/demos-');
+  });
+
+  it('forgets a choice whose list went away without being typed over', async () => {
+    // The list is withdrawn when the name resolves, which happens on
+    // GitHub's schedule rather than the typist's. An index left
+    // pointing into a list that is no longer there is not a choice
+    // anybody made -- and, indexed blindly, is a crash.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({
+      repos: [{ name: 'demos' }, { name: 'demos-two' }],
+      releases: [release('v1.9')],
+      slowReleases: 300,
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    const box = screen.getByTestId('upload-repo');
+    fireEvent.change(box, { target: { value: 'acme/demos' } });
+    // Pick one out with the mouse, which says nothing about the box.
+    fireEvent.mouseEnter(await screen.findByTestId('repo-suggestion-demos-two'));
+
+    // Then the releases arrive and the list is withdrawn under it.
+    await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v1.9'));
+    expect(screen.queryByTestId('repo-suggestions')).toBeNull();
+    expect(fireEvent.keyDown(box, { key: 'Enter' })).toBe(true);
+    expect(box).toHaveValue('acme/demos');
+  });
+
+  it('stops offering once the name is a repository with releases', async () => {
+    // The question has been answered; a list under the box would be
+    // offering to replace an answer that is already right.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: [{ name: 'demos' }], releases: [release('v1.9')] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demo' } });
+    await screen.findByTestId('repo-suggestions');
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() => expect(screen.getByTestId('upload-ref')).toHaveValue('v1.9'));
+    expect(screen.queryByTestId('repo-suggestions')).toBeNull();
+  });
+
+  it('asks about the account once, however much of the name is typed', async () => {
+    // One request per ACCOUNT. GitHub's repository search would match
+    // more thoroughly and allows ten requests a minute to an
+    // anonymous caller, which this would spend in seconds.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({ repos: [{ name: 'demos' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    for (const typed of ['acme/d', 'acme/de', 'acme/dem', 'acme/demo']) {
+      fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: typed } });
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    await screen.findByTestId('repo-suggestions');
+    expect(asked.filter((u) => u.includes('/repos?'))).toHaveLength(1);
+  });
+
+  it('waits before asking about an account that is still being typed', async () => {
+    // The owner changes when the account part is edited, and each
+    // change is a fresh listing. Without a pause, correcting a
+    // mistyped account spends a request on every wrong spelling of it.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({ repos: [{ name: 'demos' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    for (const typed of ['a/demos', 'ac/demos', 'acm/demos', 'acme/demos']) {
+      fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: typed } });
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    await screen.findByTestId('repo-suggestions');
+    expect(asked.filter((u) => u.includes('/repos?'))).toHaveLength(1);
+    expect(asked.find((u) => u.includes('/repos?'))).toContain('/users/acme/repos');
+  });
+
+  it('searches the rest of the account for a name its first page did not have', async () => {
+    // One page is a hundred repositories and an account can have far
+    // more -- bbockelm has 251 -- so a name outside the recently
+    // pushed hundred is invisible to the listing however much of it
+    // is typed. This is the only thing search is spent on.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({
+      repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })),
+      found: [{ name: 'demos-from-2019', pushed_at: '2019-01-01T00:00:00Z' }],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+
+    expect(
+      await screen.findByTestId('repo-suggestion-demos-from-2019', {}, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    const q = asked.find((u) => u.includes('/search/repositories'));
+    expect(decodeURIComponent(q ?? '')).toContain('q=demos in:name user:acme');
+  });
+
+  it('does not search when the account’s own page already answered', async () => {
+    // Search allows ten requests a MINUTE. It is kept for the
+    // question the cheap listing could not answer.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    const asked = stubGitHub({ repos: [{ name: 'demos' }], found: [{ name: 'demos' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demo' } });
+    await screen.findByTestId('repo-suggestion-demos');
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(asked.filter((u) => u.includes('/search/'))).toHaveLength(0);
+  });
+
+  it('does not search a complete account, or on one or two letters', async () => {
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    // Under a full page: the listing WAS the account, so a miss is a
+    // real miss and there is nothing else to look in.
+    const short = stubGitHub({ repos: [{ name: 'unrelated' }], found: [{ name: 'demos' }] });
+    const first = renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(short.filter((u) => u.includes('/search/'))).toHaveLength(0);
+    first.unmount();
+
+    const long = stubGitHub({
+      repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })),
+      found: [{ name: 'demos' }],
+    });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/de' } });
+    // Past the listing's pause AND the search's, so a search that was
+    // going to be made has been made by now.
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(long.filter((u) => u.includes('/search/'))).toHaveLength(0);
+  });
+
+  it('says so when the search came back with nothing, or could not be made', async () => {
+    // A refused search and an account that truly has no such name
+    // look the same from here, so it says which question was asked
+    // rather than pronouncing the name wrong.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: Array.from({ length: 100 }, (_, i) => ({ name: `other-${i}` })) });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    expect(
+      await screen.findByTestId('repo-suggestions-truncated', {}, { timeout: 3000 }),
+    ).toHaveTextContent('a search can be refused');
+  });
+
+  it('keeps quiet about a short account that simply has no match', async () => {
+    // One page was the whole account, so there is nothing more to
+    // look in and nothing useful to say.
+    listSiteApps.mockResolvedValue(listing({ upload_allowed: true, github_allowed: true }));
+    stubGitHub({ repos: [{ name: 'unrelated' }] });
+    renderPage();
+    await screen.findByTestId('upload-form');
+    fireEvent.click(screen.getByTestId('from-github'));
+    fireEvent.change(screen.getByTestId('upload-repo'), { target: { value: 'acme/demos' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('repo-status')).toHaveTextContent('no public repository'),
+    );
+    expect(screen.queryByTestId('repo-suggestions-truncated')).toBeNull();
   });
 
   it('says where an installed app came from', async () => {
