@@ -2794,6 +2794,15 @@ func (h *Handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	body := &requestBodyLimit{}
 	limitRequestBody(w, r, body)
 	w = &bodyLimitWriter{ResponseWriter: w, body: body}
+
+	// Every job this API submits records which of its surfaces
+	// submitted it, in HTCondor's own JobSubmitMethod attribute, so a
+	// site can tell a person's submission from an agent's without
+	// configuring anything here. This is the REST door and stamps
+	// every request that comes through it; the MCP server stamps its
+	// own value further in, on the one path all its transports share,
+	// and so wins for a tool call that arrives over HTTP.
+	r = r.WithContext(htcondor.WithSubmitMethod(r.Context(), htcondor.SubmitMethodRESTAPI))
 	// Every request is somebody else's, marked here for the same reason
 	// applySecurityHeaders is: no route can opt out by accident, and a route
 	// added later inherits it. What it buys is downstream, in
