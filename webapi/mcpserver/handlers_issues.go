@@ -229,11 +229,7 @@ func (s *Server) toolAnalyzeIssues(ctx context.Context, args map[string]interfac
 				fmt.Fprintf(&b, "      e.g. %s (%s): %s\n", id, ex.Owner, oneLine(ex.Message))
 			}
 		}
-		structured = append(structured, map[string]interface{}{
-			"kind": sec.kind, "title": sec.title,
-			"total": sec.total, "users": sec.users,
-			"clusters": trimExamples(clusters),
-		})
+		structured = append(structured, issueSectionResult(sec, clusters))
 	}
 	if sources != nil {
 		b.WriteString("\n" + sourcesNote(*sources))
@@ -302,6 +298,21 @@ func issueSections(set *issues.Set, granularity float64, start, end int64) []iss
 		})
 	}
 	return out
+}
+
+// issueSectionResult renders one section as the structured entry
+// analyze_issues publishes under "sections". The cluster tree below it is
+// the widest in this server -- codes, facets, examples, variants and the
+// timeline all nest -- and the schema for it is enforced by the client
+// and by nothing here, so it is pinned by
+// TestAnalyzeIssuesPopulatedSectionValidates rather than left to a live
+// pool to discover.
+func issueSectionResult(sec issueSectionView, clusters []issues.Cluster) map[string]interface{} {
+	return map[string]interface{}{
+		"kind": sec.kind, "title": sec.title,
+		"total": sec.total, "users": sec.users,
+		"clusters": trimExamples(clusters),
+	}
 }
 
 // trimExamples bounds what crosses the wire. A cluster carries up to 25
