@@ -15,6 +15,7 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
+	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
 )
 
 // These tests exist because the published outputSchema is enforced by the
@@ -649,5 +650,56 @@ func TestGetJobDagSectionValidatesAgainstTheSchema(t *testing.T) {
 			sc := finalized(t, s, "get_job", structuredTextResult("", payload))
 			validateStructured(t, "get_job", sc)
 		})
+	}
+}
+
+// TestDocHitValidatesAgainstTheSchema pins the populated case for every
+// doc_* tool. The empty case covered above cannot catch a wrong field
+// type, because an empty `results` array has no entry to typecheck, and
+// neither can toolCondorDocSearch's own tests: the docs are only present
+// under -tags embed_condor_docs, so a test that searches them skips in a
+// normal build. That left `matched_line` published as an integer while
+// the handler returned the matched line's text, and every call through a
+// schema-validating client failed (#960).
+func TestDocHitValidatesAgainstTheSchema(t *testing.T) {
+	hit := condordocs.Snippet{
+		Page:        condordocs.PageConfigVariables,
+		Source:      "config/global.rst",
+		Line:        4217,
+		Snippet:     "previous line\n:index:`JOB_DEFAULT_REQUESTMEMORY`\nnext line",
+		MatchedLine: ":index:`JOB_DEFAULT_REQUESTMEMORY`",
+	}
+	structured := map[string]interface{}{
+		"query":   "RequestMemory",
+		"results": []map[string]interface{}{docHitResult(hit)},
+		"count":   1,
+	}
+	for _, tool := range condorDocTools() {
+		if !isCondorDocTool(tool.Name) {
+			continue
+		}
+		validateStructured(t, tool.Name, structured)
+	}
+}
+
+// TestDocHitCoversEverySnippetField fails when condordocs.Snippet grows a
+// field that docHitResult does not emit, so a new field is published
+// deliberately rather than silently dropped from every doc tool result.
+func TestDocHitCoversEverySnippetField(t *testing.T) {
+	emitted := docHitResult(condordocs.Snippet{})
+	typ := reflect.TypeOf(condordocs.Snippet{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		if _, ok := emitted[name]; !ok {
+			t.Errorf("condordocs.Snippet.%s (json %q) is not emitted by docHitResult; "+
+				"add it there and to docSearchSchema()", field.Name, name)
+		}
 	}
 }

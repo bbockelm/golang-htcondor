@@ -687,6 +687,10 @@ func jobOutputStreamSchema() map[string]interface{} {
 
 // docSearchSchema is the result shape shared by every doc_* tool:
 // a set of snippet hits, each carrying page/source/line provenance.
+//
+// `line` is the 1-based line number; `matched_line` is the text of that
+// line. The two read alike and are easy to swap, so they are pinned by
+// TestDocHitValidatesAgainstTheSchema.
 func docSearchSchema() map[string]interface{} {
 	return obj(map[string]interface{}{
 		"query": strSchema,
@@ -694,7 +698,7 @@ func docSearchSchema() map[string]interface{} {
 			"page":         strSchema,
 			"source":       strSchema,
 			"line":         intSchema,
-			"matched_line": intSchema,
+			"matched_line": strSchema,
 			"snippet":      strSchema,
 		})),
 		"count": intSchema,
