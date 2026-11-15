@@ -23,6 +23,13 @@ import "github.com/modelcontextprotocol/go-sdk/mcp"
 // than trusting them blindly. They remain the only self-describing read/
 // write signal a standalone Go MCP server has, so we declare them
 // accurately regardless.
+//
+// Title is the one field aimed at a person rather than a policy engine: a
+// client that asks before running a tool has it to put in the prompt, where
+// the tool's own name is all it would otherwise have. So each one says what
+// the call does to the access point in the words the person approving it
+// would use -- "Run a command in a job" rather than exec_in_job -- and says
+// it in a few words, because a prompt is where it lands.
 
 func boolPtr(v bool) *bool { return &v }
 
@@ -32,8 +39,8 @@ func boolPtr(v bool) *bool { return &v }
 // own bookkeeping (false). DestructiveHint and IdempotentHint are left at
 // their zero values: the spec says both are meaningful only when
 // ReadOnlyHint is false.
-func readOnlyAnn(openWorld bool) *mcp.ToolAnnotations {
-	return &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolPtr(openWorld)}
+func readOnlyAnn(title string, openWorld bool) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{Title: title, ReadOnlyHint: true, OpenWorldHint: boolPtr(openWorld)}
 }
 
 // writeAnn describes a state-changing tool. destructive means the call may
@@ -44,8 +51,9 @@ func readOnlyAnn(openWorld bool) *mcp.ToolAnnotations {
 // Every state-changing tool this server exposes acts on the pool/schedd/
 // collector/credd, so openWorldHint is always true for a write and is not a
 // parameter here.
-func writeAnn(destructive, idempotent bool) *mcp.ToolAnnotations {
+func writeAnn(title string, destructive, idempotent bool) *mcp.ToolAnnotations {
 	return &mcp.ToolAnnotations{
+		Title:           title,
 		ReadOnlyHint:    false,
 		DestructiveHint: boolPtr(destructive),
 		IdempotentHint:  idempotent,
@@ -63,103 +71,103 @@ func writeAnn(destructive, idempotent bool) *mcp.ToolAnnotations {
 // confirmation policy sees the whole mutating surface as one class.
 var toolAnnotations = map[string]*mcp.ToolAnnotations{
 	// --- read-only, reaching into the pool/schedd/collector/credd ---
-	"query_jobs":               readOnlyAnn(true),
-	"get_job":                  readOnlyAnn(true),
-	"analyze_job_match":        readOnlyAnn(true),
-	"query_pool":               readOnlyAnn(true),
-	"get_job_stdout":           readOnlyAnn(true),
-	"get_job_stderr":           readOnlyAnn(true),
-	"get_job_output":           readOnlyAnn(true),
-	"query_job_archive":        readOnlyAnn(true),
-	"query_job_epochs":         readOnlyAnn(true),
-	"query_transfer_history":   readOnlyAnn(true),
-	"query_history_db":         readOnlyAnn(true),
-	"list_access_points":       readOnlyAnn(true), // multi-AP mode
-	"query_jobs_as_of":         readOnlyAnn(true),
-	"aggregate_jobs":           readOnlyAnn(true),
-	"list_service_credentials": readOnlyAnn(true),
-	"get_credential_status":    readOnlyAnn(true),
-	"tail_job_output":          readOnlyAnn(true),
-	"interactive_session_list": readOnlyAnn(true),
+	"query_jobs":               readOnlyAnn("Query the job queue", true),
+	"get_job":                  readOnlyAnn("Job details", true),
+	"analyze_job_match":        readOnlyAnn("Diagnose job matching", true),
+	"query_pool":               readOnlyAnn("Query pool machines", true),
+	"get_job_stdout":           readOnlyAnn("Read job stdout", true),
+	"get_job_stderr":           readOnlyAnn("Read job stderr", true),
+	"get_job_output":           readOnlyAnn("Fetch job output files", true),
+	"query_job_archive":        readOnlyAnn("Search completed jobs", true),
+	"query_job_epochs":         readOnlyAnn("Read job run attempts", true),
+	"query_transfer_history":   readOnlyAnn("Read file transfer history", true),
+	"query_history_db":         readOnlyAnn("Query the history database", true),
+	"list_access_points":       readOnlyAnn("List access points", true), // multi-AP mode
+	"query_jobs_as_of":         readOnlyAnn("Query past job state", true),
+	"aggregate_jobs":           readOnlyAnn("Summarize jobs", true),
+	"list_service_credentials": readOnlyAnn("List stored credentials", true),
+	"get_credential_status":    readOnlyAnn("Check credential status", true),
+	"tail_job_output":          readOnlyAnn("Tail a running job's output", true),
+	"interactive_session_list": readOnlyAnn("List interactive sessions", true),
 	// watch_jobs observes the pool for a condition; it registers a watch in
 	// this server's bookkeeping but touches no job, which is why the scope
 	// model already treats it (and its two companions) as read-only.
-	"watch_jobs": readOnlyAnn(true),
+	"watch_jobs": readOnlyAnn("Watch jobs for a change", true),
 
 	// --- read-only, closed world: static docs, skills, and this server's
 	// own version and watch bookkeeping ---
-	"doc_job_attributes":     readOnlyAnn(false),
-	"doc_machine_attributes": readOnlyAnn(false),
-	"doc_submit_syntax":      readOnlyAnn(false),
-	"doc_config_variables":   readOnlyAnn(false),
-	"doc_search":             readOnlyAnn(false),
-	"doc_guide":              readOnlyAnn(false),
-	"skills_list":            readOnlyAnn(false),
-	"skills_get":             readOnlyAnn(false),
-	"get_version":            readOnlyAnn(false),
-	"whoami":                 readOnlyAnn(false),
-	"check_watches":          readOnlyAnn(false),
+	"doc_job_attributes":     readOnlyAnn("Look up job attributes", false),
+	"doc_machine_attributes": readOnlyAnn("Look up machine attributes", false),
+	"doc_submit_syntax":      readOnlyAnn("Look up submit syntax", false),
+	"doc_config_variables":   readOnlyAnn("Look up config settings", false),
+	"doc_search":             readOnlyAnn("Search the HTCondor manual", false),
+	"doc_guide":              readOnlyAnn("Read the agent guide", false),
+	"skills_list":            readOnlyAnn("List site skills", false),
+	"skills_get":             readOnlyAnn("Read a site skill", false),
+	"get_version":            readOnlyAnn("Server version", false),
+	"whoami":                 readOnlyAnn("Who am I here", false),
+	"check_watches":          readOnlyAnn("Collect watch results", false),
 	// analyze_issues reads the queue and run-attempt history and groups
 	// what it finds. Open-world: what it reports depends on what the
 	// access point is doing, so two calls a minute apart legitimately
 	// differ.
-	"analyze_issues": readOnlyAnn(true),
+	"analyze_issues": readOnlyAnn("Diagnose job failures", true),
 	// analyze_utilization reads finished jobs and the pool's machines.
-	"analyze_utilization": readOnlyAnn(true),
+	"analyze_utilization": readOnlyAnn("Report resource utilization", true),
 	// get_access_point_policy reads the schedd's configuration. Open-world:
 	// the answer is whatever the access point is configured with now.
-	"get_access_point_policy": readOnlyAnn(true),
-	"cancel_watch":            readOnlyAnn(false),
+	"get_access_point_policy": readOnlyAnn("Read access point policy", true),
+	"cancel_watch":            readOnlyAnn("Cancel a watch", false),
 
 	// --- destructive job-control surface (issue #391) ---
 	// submit_job is grouped here per the issue even though it only creates;
 	// each call makes a new job, so it is not idempotent.
-	"submit_job": writeAnn(true, false),
+	"submit_job": writeAnn("Submit a job", true, false),
 	// submit_dag creates a new workflow on every call, like submit_job.
-	"submit_dag": writeAnn(true, false),
+	"submit_dag": writeAnn("Submit a DAG workflow", true, false),
 	// build_container submits a job like submit_job does. Not
 	// idempotent: calling it again runs another build and overwrites
 	// whatever is at the destination. Open-world because the image
 	// lands in object storage outside the pool.
-	"build_container": writeAnn(true, false),
-	"hold_job":        writeAnn(true, true),
-	"release_job":     writeAnn(true, true),
-	"remove_job":      writeAnn(true, true),
-	"remove_jobs":     writeAnn(true, true),
-	"edit_job":        writeAnn(true, true),
+	"build_container": writeAnn("Build a container image", true, false),
+	"hold_job":        writeAnn("Hold a job", true, true),
+	"release_job":     writeAnn("Release a held job", true, true),
+	"remove_job":      writeAnn("Remove a job", true, true),
+	"remove_jobs":     writeAnn("Remove several jobs", true, true),
+	"edit_job":        writeAnn("Edit job attributes", true, true),
 	// advertise_to_collector re-publishes an ad; sending the same ad again
 	// refreshes it to the same state, so it is idempotent.
-	"advertise_to_collector": writeAnn(true, true),
+	"advertise_to_collector": writeAnn("Advertise to the collector", true, true),
 
 	// --- other state-changing tools ---
 	// upload_job_input only adds files to a job's spool (additive); the same
 	// upload lands the spool in the same state.
-	"upload_job_input": writeAnn(false, true),
+	"upload_job_input": writeAnn("Upload job input files", false, true),
 	// create_input_upload_url does not touch the job -- it hands back a
 	// capability. Minting a second URL for the same job neither replaces
 	// the first nor changes anything, so: additive, and idempotent in the
 	// only sense that matters (calling twice leaves the same state).
-	"create_input_upload_url": writeAnn(false, true),
+	"create_input_upload_url": writeAnn("Create an input upload link", false, true),
 	// create_output_download_url does not touch the job either -- it
 	// hands back a capability to read one. Idempotent in the sense that
 	// matters: calling it twice mints two equivalent URLs.
-	"create_output_download_url": writeAnn(false, true),
+	"create_output_download_url": writeAnn("Create an output download link", false, true),
 	// create_watch_url does not touch the watch -- it hands back a
 	// read-only capability naming it. Minting a second URL for the same
 	// watch neither replaces the first nor changes anything.
-	"create_watch_url": writeAnn(false, true),
+	"create_watch_url": writeAnn("Create a watch link", false, true),
 	// storing a credential overwrites any prior one for the service/handle;
 	// deleting one removes it. Both are idempotent on a repeat.
-	"store_service_credential":  writeAnn(true, true),
-	"delete_service_credential": writeAnn(true, true),
+	"store_service_credential":  writeAnn("Store a credential", true, true),
+	"delete_service_credential": writeAnn("Delete a credential", true, true),
 	// interactive sessions: starting makes a new session (additive, not
 	// idempotent); exec runs an arbitrary command in one (may destroy, not
 	// idempotent); stopping tears one down (destructive, idempotent).
-	"interactive_session_start": writeAnn(false, false),
-	"interactive_session_exec":  writeAnn(true, false),
-	"interactive_session_stop":  writeAnn(true, true),
+	"interactive_session_start": writeAnn("Start an interactive session", false, false),
+	"interactive_session_exec":  writeAnn("Run a command in a session", true, false),
+	"interactive_session_stop":  writeAnn("Stop an interactive session", true, true),
 	// exec_in_job runs an arbitrary command inside a live job.
-	"exec_in_job": writeAnn(true, false),
+	"exec_in_job": writeAnn("Run a command in a job", true, false),
 }
 
 // annotationsFor returns the behavioural hints for a tool, or nil if the
