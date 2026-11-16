@@ -1016,6 +1016,17 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 		ctx = withTraceID(ctx, traceID)
 	}
 
+	// Record on every job this call submits that an agent submitted
+	// it, in HTCondor's own JobSubmitMethod attribute. Here rather
+	// than at each submitting tool because the submission is not
+	// always the tool's own: an interactive session and a container
+	// build reach the schedd through their own managers, and a
+	// workflow through DAGMan's. All of them carry this context, so
+	// all of them are stamped without knowing the attribute exists.
+	// Set after the REST door's value, and so winning over it, for a
+	// tool call that arrived over HTTP.
+	ctx = htcondor.WithSubmitMethod(ctx, htcondor.SubmitMethodMCP)
+
 	started := time.Now()
 	s.logger.Info(logging.DestinationMCP, "MCP tool call",
 		"tool", request.Name,

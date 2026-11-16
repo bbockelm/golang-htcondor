@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -124,4 +125,22 @@ func servedTools(t *testing.T, s *Server) []Tool {
 		t.Fatalf("tools field is %T, want []Tool", m["tools"])
 	}
 	return tools
+}
+
+// TestEveryAnnotationHasATitle guards the field a person sees. A tool
+// whose annotations carry no Title is approved under its bare name, which
+// is the thing Title exists to improve on; and a long one is a paragraph
+// in a confirmation prompt rather than a label. Six words is comfortably
+// above every title here and well short of a sentence.
+func TestEveryAnnotationHasATitle(t *testing.T) {
+	for name, ann := range toolAnnotations {
+		if ann.Title == "" {
+			t.Errorf("tool %q has annotations but no Title; add one in annotations.go", name)
+			continue
+		}
+		if words := len(strings.Fields(ann.Title)); words > 6 {
+			t.Errorf("tool %q: Title %q is %d words; a title is a label, not a description",
+				name, ann.Title, words)
+		}
+	}
 }

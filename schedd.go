@@ -636,6 +636,7 @@ func (s *Schedd) Submit(ctx context.Context, submitFileContent string) (string, 
 		submissionErr = fmt.Errorf("failed to generate job ads: %w", err)
 		return "", submissionErr
 	}
+	stampSubmitMethod(ctx, submitResult)
 
 	if factory := submitResult.Factory; factory != nil {
 		// The itemdata goes first, because the digest's queue statement
@@ -762,6 +763,7 @@ func (s *Schedd) SubmitRemote(ctx context.Context, submitFileContent string) (cl
 		submissionErr = fmt.Errorf("failed to generate job ads: %w", err)
 		return 0, nil, submissionErr
 	}
+	stampSubmitMethod(ctx, submitResult)
 
 	// Whether the submit FILE named leave_in_queue, under either spelling.
 	// The parser's default for it is a local submission's, which a spooling
