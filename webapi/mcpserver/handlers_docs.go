@@ -178,13 +178,7 @@ func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args ma
 	text := renderDocHits(query, hits)
 	results := make([]map[string]interface{}, 0, len(hits))
 	for _, h := range hits {
-		results = append(results, map[string]interface{}{
-			"page":         string(h.Page),
-			"source":       h.Source,
-			"line":         h.Line,
-			"matched_line": h.MatchedLine,
-			"snippet":      h.Snippet,
-		})
+		results = append(results, docHitResult(h))
 	}
 	return map[string]interface{}{
 		"content": []map[string]interface{}{
@@ -193,6 +187,20 @@ func (s *Server) toolCondorDocSearch(_ context.Context, toolName string, args ma
 		"results":           results,
 		"structuredContent": map[string]interface{}{"query": query, "results": results, "count": len(results)},
 	}, nil
+}
+
+// docHitResult renders one snippet hit as the structured result entry
+// docSearchSchema publishes. The schema is enforced by the client, not
+// here, so a field whose type drifts from the schema fails the whole tool
+// call over there and nothing over here; keep the two in step.
+func docHitResult(h condordocs.Snippet) map[string]interface{} {
+	return map[string]interface{}{
+		"page":         string(h.Page),
+		"source":       h.Source,
+		"line":         h.Line,        // 1-based line number
+		"matched_line": h.MatchedLine, // the text of that line
+		"snippet":      h.Snippet,
+	}
 }
 
 // renderDocHits formats a slice of snippet hits as plain text suitable
