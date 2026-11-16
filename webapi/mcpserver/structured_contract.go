@@ -70,9 +70,21 @@ func (s *Server) finalizeToolResult(name string, result interface{}) interface{}
 		if fixed, changed := emptyNotNull(sc); changed {
 			m["structuredContent"] = fixed
 		}
+		// nil in a real server. The test build installs a checker here
+		// (see schema_assert_test.go), so that every result any test
+		// produces is validated against the published schema without
+		// each test having to remember to ask. The schema is enforced
+		// by the client and by nothing on this side, so the only way to
+		// see a mismatch before a user does is to check it here.
+		if checkStructuredAgainstSchema != nil {
+			checkStructuredAgainstSchema(name, m["structuredContent"])
+		}
 	}
 	return m
 }
+
+// checkStructuredAgainstSchema is a test-only hook; see finalizeToolResult.
+var checkStructuredAgainstSchema func(tool string, structured interface{})
 
 // emptyNotNull replaces nil slices and nil maps with empty ones, so that a
 // result with nothing in it marshals as `[]` / `{}` rather than `null` and
