@@ -28,10 +28,23 @@ import (
 // endpoints, so both surfaces enforce the same limits and report the same
 // accounting.
 
+// SpoolLimits are the limits one upload_job_input call is held to, with
+// the operator's HTTP_API_SPOOL_MAX_UPLOAD_BYTES in place of the
+// default. The stdio CLI leaves the field zero, which LimitsFor reads
+// as "unset" and answers with the default rather than with no ceiling.
+//
+// Exported because the HTTP daemon builds this server from its own
+// configuration and has to be able to confirm the two surfaces ended up
+// bounded alike; a knob that reached one of them and not the other
+// would look configured and enforce the old default.
+func (s *Server) SpoolLimits() spool.Limits {
+	return spool.LimitsFor(s.spoolMaxUploadBytes)
+}
+
 // procsAwaitingInput returns the cluster's procs that are held for
 // spooling, oldest proc first, confined to the caller's own jobs.
 func (s *Server) procsAwaitingInput(ctx context.Context, cluster int) ([]*classad.ClassAd, error) {
-	lim := spool.DefaultLimits()
+	lim := s.SpoolLimits()
 	constraint, err := s.scopeToOwner(ctx, spool.AwaitingInputConstraint(cluster), tierMutate)
 	if err != nil {
 		return nil, err
@@ -93,7 +106,7 @@ func (s *Server) uploadToCluster(
 	sizeWarning string,
 ) (interface{}, error) {
 	src := spool.Bytes(tarBytes)
-	lim := spool.DefaultLimits()
+	lim := s.SpoolLimits()
 
 	attempt, planned, err := spool.Plan(ads, src.Size(), lim)
 	if err != nil {

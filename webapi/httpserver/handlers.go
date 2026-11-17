@@ -1789,11 +1789,17 @@ func (s *Handler) handleBulkReleaseJobs(w http.ResponseWriter, r *http.Request) 
 	s.handleBulkJobAction(w, r, "Released", "release", s.getSchedd().ReleaseJobs)
 }
 
-// maxUploadBytes bounds a single raw-tar upload. The per-proc ceiling a
-// cluster-wide call applies (spool.PlanStreaming) is smaller still; this
-// is the backstop for the single-proc path and for a body that would
-// otherwise be read until the disk complained.
-const maxUploadBytes = 1024 * 1024 * 1024 // 1 GiB
+// spoolLimits are the limits one upload is held to, with the operator's
+// HTTP_API_SPOOL_MAX_UPLOAD_BYTES in place of the default.
+//
+// MaxVolume does double duty, and deliberately: for a cluster-wide call
+// it bounds the tar times the procs it serves, and for a single proc it
+// is the whole of what that call may transfer. One knob therefore means
+// one sentence -- no single upload command moves more than this many
+// bytes -- rather than two numbers that happened to be near each other.
+func (s *Handler) spoolLimits() spool.Limits {
+	return spool.LimitsFor(s.spoolMaxUploadBytes)
+}
 
 // handleJobInput handles PUT /api/v1/jobs/{id}/input
 func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -1826,10 +1832,11 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 	// MaxBytesReader, not io.LimitReader: a LimitReader reports its cap
 	// as io.EOF, which is indistinguishable from the end of the upload
 	// -- so a body over the cap would spool as a silently truncated tar
-	// and release the jobs with files missing. Today spool's own,
-	// smaller per-proc ceiling always fires first, but that is an
-	// accident of the two numbers and not something to rely on.
-	setBodyLimit(w, r, maxUploadBytes)
+	// and release the jobs with files missing. A cluster-wide call
+	// divides this same ceiling across its procs, so spool's per-proc
+	// limit fires first there; on the single-proc path this is the
+	// whole of the bound.
+	setBodyLimit(w, r, s.spoolLimits().MaxVolume)
 	limitedReader := r.Body
 
 	if target.AllProcs {
@@ -1840,7 +1847,8 @@ func (s *Handler) handleJobInput(w http.ResponseWriter, r *http.Request, jobID s
 		}
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded successfully",
-			fmt.Sprintf("PUT again to /api/v1/jobs/%s/input", s.clusterPathID(ctx, target.Cluster))))
+			fmt.Sprintf("PUT again to /api/v1/jobs/%s/input", s.clusterPathID(ctx, target.Cluster)),
+			s.spoolLimits()))
 		return
 	}
 
@@ -1902,7 +1910,7 @@ func (s *Handler) writeSpoolError(w http.ResponseWriter, err error) {
 // step is to call again -- which it cannot know to do from a bare
 // success. retry names the call to repeat, since the two endpoints
 // differ in method and path.
-func fanOutResponse(res *spool.Result, cluster int, message, retry string) map[string]interface{} {
+func fanOutResponse(res *spool.Result, cluster int, message, retry string, lim spool.Limits) map[string]interface{} {
 	body := map[string]interface{}{
 		"message":         message,
 		"cluster_id":      cluster,
@@ -1918,7 +1926,7 @@ func fanOutResponse(res *spool.Result, cluster int, message, retry string) map[s
 		body["next"] = fmt.Sprintf("%d proc(s) still await input; %s", res.Remaining(), retry)
 		if res.Capped {
 			body["limits"] = fmt.Sprintf("one call spools at most %d procs or %d bytes",
-				spool.DefaultLimits().MaxProcs, spool.DefaultLimits().MaxVolume)
+				lim.MaxProcs, lim.MaxVolume)
 		}
 	}
 	return body
@@ -2129,7 +2137,8 @@ func (s *Handler) handleJobInputMultipart(w http.ResponseWriter, r *http.Request
 	if fanOut != nil {
 		s.writeJSON(w, http.StatusOK, fanOutResponse(fanOut, target.Cluster,
 			"Cluster input files uploaded via multipart",
-			fmt.Sprintf("POST again to /api/v1/jobs/%s/input/multipart", s.clusterPathID(ctx, target.Cluster))))
+			fmt.Sprintf("POST again to /api/v1/jobs/%s/input/multipart", s.clusterPathID(ctx, target.Cluster)),
+			s.spoolLimits()))
 		return
 	}
 
@@ -4204,7 +4213,7 @@ func (s *Handler) spoolClusterFromStream(
 	cluster int,
 	tar io.Reader,
 ) (*spool.Result, error) {
-	lim := spool.DefaultLimits()
+	lim := s.spoolLimits()
 
 	ads, err := fetchProcAdsAwaitingInput(ctx, s.scheddFor(ctx), cluster, lim.MaxProcs,
 		func(c string) (string, error) { return s.jobsOwnerScope(ctx, r, c, jobScopeMutate) })

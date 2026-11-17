@@ -142,6 +142,9 @@ type Config struct {
 	// UtilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS: the most jobs
 	// one /api/v1/utilization analysis may read. Zero means the default.
 	UtilizationMaxJobs int
+	// SpoolMaxUploadBytes is HTTP_API_SPOOL_MAX_UPLOAD_BYTES: the most
+	// one upload command may transfer. Zero means the default.
+	SpoolMaxUploadBytes int64
 	// RuntimeEstimateInterval and RuntimeEstimateBackfill are
 	// HTTP_API_RUNTIME_ESTIMATE_INTERVAL and _BACKFILL. See the
 	// HandlerConfig fields of the same names.
@@ -583,6 +586,7 @@ func NewServer(cfg Config) (*Server, error) {
 		UsageStatsMaxSeries:         cfg.UsageStatsMaxSeries,
 		RESTStatsEnabled:            cfg.RESTStatsEnabled,
 		UtilizationMaxJobs:          cfg.UtilizationMaxJobs,
+		SpoolMaxUploadBytes:         cfg.SpoolMaxUploadBytes,
 		RuntimeEstimateInterval:     cfg.RuntimeEstimateInterval,
 		RuntimeEstimateBackfill:     cfg.RuntimeEstimateBackfill,
 		DBMirrorName:                cfg.DBMirrorName,

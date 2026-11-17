@@ -641,6 +641,9 @@ type Handler struct {
 	// utilizationMaxJobs is HTTP_API_UTILIZATION_MAX_JOBS; zero means the
 	// default.
 	utilizationMaxJobs int
+	// spoolMaxUploadBytes is HTTP_API_SPOOL_MAX_UPLOAD_BYTES; zero means
+	// the default. Read through spoolLimits, never directly.
+	spoolMaxUploadBytes int64
 	// jobSetCache holds one workflow's jobs at a time for paging.
 	jobSetCacheOnce sync.Once
 	jobSetCacheVal  *jobSetCache
@@ -909,6 +912,11 @@ type HandlerConfig struct {
 	// one utilization analysis may read. Zero means the default (a
 	// million).
 	UtilizationMaxJobs int
+	// SpoolMaxUploadBytes is HTTP_API_SPOOL_MAX_UPLOAD_BYTES: the most
+	// bytes one upload command may transfer, counting a cluster-wide
+	// fan-out as the tar times the procs it serves. Zero means the
+	// default; see spool.LimitsFor.
+	SpoolMaxUploadBytes int64
 	// RuntimeEstimateInterval is how often the runtime estimator reads
 	// newly finished jobs from the htcondordb mirror
 	// (HTTP_API_RUNTIME_ESTIMATE_INTERVAL). Zero or negative disables
@@ -1895,6 +1903,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	}
 	h.usageStatsOmitUser = cfg.UsageStatsOmitUser
 	h.utilizationMaxJobs = cfg.UtilizationMaxJobs
+	h.spoolMaxUploadBytes = cfg.SpoolMaxUploadBytes
 	// The mirror's own state is exported at scrape time from whatever
 	// discovery last saw, so /metrics answers "is the htcondordb
 	// integration working?" without a request having to exercise it.
@@ -2696,9 +2705,11 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		TrustDomain:             h.trustDomain,
 		// analyze_utilization reads at most what the Utilization page may.
 		UtilizationMaxJobs: h.utilizationMaxJobs,
-		UIDDomain:          h.uidDomain,
-		HTTPBaseURL:        h.httpBaseURL,
-		Logger:             h.logger,
+		// upload_job_input is bounded exactly as the REST upload is.
+		SpoolMaxUploadBytes: h.spoolMaxUploadBytes,
+		UIDDomain:           h.uidDomain,
+		HTTPBaseURL:         h.httpBaseURL,
+		Logger:              h.logger,
 		// Behind HTTP every call is on behalf of somebody else, so an
 		// owner-scoped tool that cannot identify its caller must refuse
 		// rather than fall back to whoever this daemon authenticates as.
