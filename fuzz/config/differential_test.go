@@ -386,25 +386,98 @@ func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
 var nestingDepth = divergenceClass{
 	name:  "C++ gives up on an expression nested deeper than it will go",
 	input: hasDeepNesting,
+	match: cppDroppedTheMacroResult,
 }
 
-// The two counts hasDeepNesting compares against, each set just under the
-// cut-off measured for the cap it stands for: 166 openers for the parser,
+// cppDroppedTheMacroResult reports whether every row the two tables disagree
+// about is the Go row with ONE run of characters cut out of it -- the shape
+// of a macro function that produced nothing where Go produced a value.
+//
+// This is the half that does not depend on spotting the nesting in the text,
+// and it is here because the input predicate has now been too narrow three
+// times: spaces between the operators, vertical tabs between them, and a
+// quote before them that swallowed the line. Each time a recorded divergence
+// was reported as a new finding. With both halves required, the text
+// predicate can be generous without the class excusing anything else, because
+// a real disagreement about a VALUE does not have this shape: `0` against `1`
+// is not `0` with a run deleted.
+//
+// A deletion rather than an empty value, because the macro function need not
+// be the whole line. `0=A"$EVAL(...)` leaves C++ with `A"` and Go with
+// `A"undefined`, and the rows still differ by exactly the result.
+func cppDroppedTheMacroResult(goTable, cppTable string) bool {
+	goRows, cppRows := tableRows(goTable), tableRows(cppTable)
+	dropped := false
+	for name, goVal := range goRows {
+		cppVal, ok := cppRows[name]
+		if !ok {
+			return false
+		}
+		if goVal == cppVal {
+			continue
+		}
+		if !isOneRunDeleted(goVal, cppVal) {
+			return false
+		}
+		dropped = true
+	}
+	// An attribute only C++ produced leaves every Go row matching, so
+	// dropped stays false and the difference is reported. That is also
+	// what happens when the rows read identically although the tables did
+	// not: nothing was examined, so nothing is excused.
+	return dropped
+}
+
+// tableRows splits a canonical table into name -> value.
+func tableRows(table string) map[string]string {
+	rows := make(map[string]string)
+	for _, line := range strings.Split(table, "\n") {
+		if line == "" {
+			continue
+		}
+		name, value, found := strings.Cut(line, "\x1f")
+		if !found {
+			continue
+		}
+		rows[name] = value
+	}
+	return rows
+}
+
+// isOneRunDeleted reports whether cpp is go with one contiguous run removed.
+func isOneRunDeleted(goVal, cppVal string) bool {
+	if len(cppVal) >= len(goVal) {
+		return false
+	}
+	pre := 0
+	for pre < len(cppVal) && goVal[pre] == cppVal[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(cppVal)-pre && goVal[len(goVal)-1-suf] == cppVal[len(cppVal)-1-suf] {
+		suf++
+	}
+	return pre+suf == len(cppVal)
+}
+
+// The two counts hasDeepNesting compares against, both well below the
+// cut-offs measured for the caps they stand for: 166 openers for the parser,
 // 401 operators for the evaluator.
 //
-// The old class used a threshold at half its cut-off on the argument that
-// being low cost nothing. It does now. That predicate demanded an unbroken
-// run of unary operators, which no config contains at any length; this one
-// counts chains that ordinary expressions do have, and
-// TestDivergenceClassesRejectOtherShapes holds a 300-operator chain that C++
-// evaluates perfectly well and that must stay reportable. So the margin is
-// small, and deliberately so. What it costs: a chain of 390 to 400, or a
-// nesting of 160 to 165, is excused although C++ handles it -- but only if
-// that input ALSO diverges, since a class is never consulted about anything
-// else.
+// Low on purpose. The cut-off depends on how deep the expression already sits
+// when the chain starts, so a chain somewhere more nested reaches either cap
+// sooner than a bare one does, and a threshold set just under the measured
+// number misses exactly those. Being low is safe here only because the class
+// also requires cppDroppedTheMacroResult: a 300-operator chain that C++
+// evaluates correctly scores far above these numbers and is still reported,
+// because its two tables differ about a VALUE rather than by a deletion.
+// TestDivergenceClassesRejectOtherShapes holds that case.
+//
+// Without that second half the threshold had to sit just under the cut-off,
+// and a chain that started deep was reported as a new finding every time.
 const (
-	deepBrackets = 160
-	deepChain    = 390
+	deepBrackets = 120
+	deepChain    = 120
 )
 
 // hasDeepNesting reports whether any line of s is nested deeply enough to
@@ -476,10 +549,20 @@ func nestingCounts(line string) (brackets, chain int) {
 				chain = run
 			}
 		case c == '"' || c == '\'':
-			// A string literal is one operand however many operator
+			// A CLOSED string literal is one operand however many operator
 			// characters are written inside it. Skipping it is what keeps
 			// a line of quoted text from reading as a deep expression.
-			end := endOfLiteral(line, i)
+			//
+			// An unterminated quote is not a literal and must not swallow
+			// what follows it. Treating it as one is how `0=A"$EVAL(!!!...)`
+			// scored zero and was reported as a new finding: everything
+			// after the quote, the whole 401-operator chain included,
+			// disappeared into a string that never ends.
+			end, closed := endOfLiteral(line, i)
+			if !closed {
+				run, operand = 0, false
+				continue
+			}
 			if operand {
 				run = 0
 			}
@@ -523,19 +606,19 @@ func isOperandByte(b byte) bool {
 }
 
 // endOfLiteral returns the index of the quote closing the literal that opens
-// at i, or the last index of the line when nothing closes it. A backslash
-// escapes the next byte, as it does in the ClassAd lexer.
-func endOfLiteral(line string, i int) int {
+// at i, and whether one was found at all. A backslash escapes the next byte,
+// as it does in the ClassAd lexer.
+func endOfLiteral(line string, i int) (int, bool) {
 	q := line[i]
 	for j := i + 1; j < len(line); j++ {
 		switch line[j] {
 		case '\\':
 			j++
 		case q:
-			return j
+			return j, true
 		}
 	}
-	return len(line) - 1
+	return i, false
 }
 
 // recognize returns the recorded class that accounts for this divergence, or
@@ -734,6 +817,26 @@ var seeds = []seedCase{
 		input: "0=$EVAL(" + strings.Repeat("!", 152) + "\v" +
 			strings.Repeat("!", 183) + "\v" + strings.Repeat("!", 66) + "'')",
 		reason: "nestingDepth, reached with vertical tabs between the operators",
+		class:  &nestingDepth,
+	},
+
+	{
+		// Found by FuzzConfigParseExpand on the re-run after the class was
+		// generalized, and the reason it now has a match half as well. The
+		// chain is the same 401; what hid it is the unterminated quote in
+		// front, which the predicate read as a string literal running to
+		// the end of the line and so counted nothing at all.
+		input:  "0=A\"$EVAL(" + strings.Repeat("!", 401) + "'')",
+		reason: "nestingDepth, behind a quote that never closes",
+		class:  &nestingDepth,
+	},
+
+	{
+		// The macro function in the MIDDLE of a value, so what C++ drops
+		// is a run with text on both sides of it rather than the whole
+		// value. `0=A$EVAL(...)B` is `AundefinedB` here and `AB` there.
+		input:  "0=A$EVAL(" + strings.Repeat("!", 401) + "'')B",
+		reason: "nestingDepth, with the result dropped from mid-value",
 		class:  &nestingDepth,
 	},
 
@@ -969,6 +1072,70 @@ func firstLongLine(s string) string {
 	return best
 }
 
+// TestOneRunDeleted pins the match half. The run C++ drops is not always at
+// the end of the value -- a macro function can sit anywhere in it -- and a
+// rule that only recognized a dropped SUFFIX would narrow the class back to
+// where it keeps failing.
+func TestOneRunDeleted(t *testing.T) {
+	deleted := [][2]string{
+		{"undefined", ""},         // the whole value
+		{"A\"undefined", "A\""},   // text before
+		{"AundefinedB", "AB"},     // text on both sides
+		{"undefinedB", "B"},       // text after
+		{"xxundefinedxx", "xxxx"}, // repeated text around it
+	}
+	for _, c := range deleted {
+		if !isOneRunDeleted(c[0], c[1]) {
+			t.Errorf("isOneRunDeleted(%q, %q) = false, want true", c[0], c[1])
+		}
+	}
+	kept := [][2]string{
+		{"0", "1"},     // a different value, same length
+		{"0", "0"},     // no difference at all
+		{"ab", "ba"},   // reordered, not deleted
+		{"abc", "axc"}, // substituted, not deleted
+		{"ab", "abc"},  // C++ produced MORE
+	}
+	for _, c := range kept {
+		if isOneRunDeleted(c[0], c[1]) {
+			t.Errorf("isOneRunDeleted(%q, %q) = true, want false", c[0], c[1])
+		}
+	}
+}
+
+// TestCppDroppedTheMacroResult pins the whole-table rule, which has to say
+// NO whenever it did not actually see the difference. The tables come in as
+// text and are read row by row; anything the reading loses must leave the
+// class refusing to excuse, not excusing by default.
+func TestCppDroppedTheMacroResult(t *testing.T) {
+	yes := [][2]string{
+		{"0\x1fundefined\n", "0\x1f\n"},
+		{"0\x1fAundefinedB\nA\x1f1\n", "0\x1fAB\nA\x1f1\n"},
+	}
+	for _, c := range yes {
+		if !cppDroppedTheMacroResult(c[0], c[1]) {
+			t.Errorf("cppDroppedTheMacroResult(%q, %q) = false, want true", c[0], c[1])
+		}
+	}
+	no := [][2]string{
+		// a real disagreement about a value
+		{"0\x1f0\n", "0\x1f1\n"},
+		// one side has an attribute the other does not, each way round
+		{"0\x1fx\nA\x1f1\n", "0\x1fx\n"},
+		{"0\x1fx\n", "0\x1fx\nA\x1f1\n"},
+		// a second row differs in a way that is not a deletion
+		{"0\x1fundefined\nA\x1f1\n", "0\x1f\nA\x1f2\n"},
+		// the tables differ only in text the row reader drops, so the
+		// difference was never examined and must not be excused
+		{"0\x1fx\nmalformed\n", "0\x1fx\n"},
+	}
+	for _, c := range no {
+		if cppDroppedTheMacroResult(c[0], c[1]) {
+			t.Errorf("cppDroppedTheMacroResult(%q, %q) = true, want false", c[0], c[1])
+		}
+	}
+}
+
 // TestDeepNestingPredicate pins hasDeepNesting from both sides. A class
 // defined by what was written is only as good as its predicate: too narrow
 // and the nightly reports a recorded divergence as a new one, which is how
@@ -994,6 +1161,11 @@ func TestDeepNestingPredicate(t *testing.T) {
 		"nested parens":    "A=" + strings.Repeat("(", 166) + "1" + strings.Repeat(")", 166),
 		"nested lists":     "A=" + strings.Repeat("{", 166) + "1" + strings.Repeat("}", 166),
 		"deep on line two": "A = 1\nB=$EVAL(" + strings.Repeat("!", 401) + "true)\n",
+		// An unterminated quote is not a literal. Reading it as one hid a
+		// whole 401-operator chain behind two characters.
+		"behind an unterminated quote": "0=A\"$EVAL(" + strings.Repeat("!", 401) + "'')",
+		"behind an unterminated apostrophe": "0=it's $EVAL(" +
+			strings.Repeat("!", 401) + "true)",
 	}
 	for name, in := range deep {
 		if !hasDeepNesting(in) {
