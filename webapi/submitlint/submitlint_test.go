@@ -310,3 +310,30 @@ func TestInspectNamesAnIneffectiveTransferExecutable(t *testing.T) {
 		t.Errorf("rejection should say the setting is not set: %s", insp.Fatal)
 	}
 }
+
+// QueueCount is the jobs the file asks for, which is what the MCP
+// confirmation threshold is measured against. A queue over a list is the
+// length of the list, not 1 -- counting `queue` statements instead would
+// let a 10,000-job submission past a threshold of 50.
+func TestInspectReportsTheJobCount(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"no queue statement", "executable = /bin/true\n", 1},
+		{"bare queue", "executable = /bin/true\nqueue\n", 1},
+		{"queue N", "executable = /bin/true\nqueue 500\n", 500},
+		{"queue from a list", "executable = /bin/true\nqueue name from (\na\nb\nc\n)\n", 3},
+		{"queue N from a list", "executable = /bin/true\nqueue 2 name from (\na\nb\nc\n)\n", 6},
+		// Unparseable is 0, meaning "unknown", not "none": the schedd is
+		// the authority on what it accepts and still gets the file.
+		{"unparseable", "queue 5 from from from (\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Inspect(tc.raw).QueueCount; got != tc.want {
+				t.Errorf("QueueCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

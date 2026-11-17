@@ -342,3 +342,53 @@ func (h *Handler) warnIfSuperuserNeedsRestart(param string) {
 				"it is built at startup and needs a restart to enable")
 	}
 }
+
+// SetMCPConfirmSubmitOver and SetMCPConfirmRemoveOver set the job counts
+// above which the MCP submit and remove tools ask the person running the
+// client to confirm.
+//
+// Dynamic for the reason the read-only setting is: an operator who has
+// just watched an agent act at a scale they did not expect wants the
+// gate up now, for the sessions already connected.
+//
+// One setter each, because the reconfigure table is keyed by setting and
+// an operator may raise one without restating the other. Each reads the
+// other's current value back out so the tool server is told both, which
+// is the only shape its setter has.
+func (h *Handler) SetMCPConfirmSubmitOver(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	v := h.reconfigCount("HTTP_API_MCP_CONFIRM_SUBMIT_OVER", spec)
+	h.mcpConfirmSubmitOver.Store(int64(v))
+	h.mcpServer.SetConfirmThresholds(v, int(h.mcpConfirmRemoveOver.Load()))
+}
+
+// SetMCPConfirmRemoveOver is the removal half; see
+// SetMCPConfirmSubmitOver above.
+func (h *Handler) SetMCPConfirmRemoveOver(spec string) {
+	if h.mcpServer == nil {
+		return
+	}
+	v := h.reconfigCount("HTTP_API_MCP_CONFIRM_REMOVE_OVER", spec)
+	h.mcpConfirmRemoveOver.Store(int64(v))
+	h.mcpServer.SetConfirmThresholds(int(h.mcpConfirmSubmitOver.Load()), v)
+}
+
+// reconfigCount reads a non-negative job count, returning 0 -- off --
+// for anything empty, negative or unreadable, and saying so in the log
+// when the operator wrote something that was not a count.
+func (h *Handler) reconfigCount(name, spec string) int {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(spec)
+	if err != nil || v < 0 {
+		h.logger.Warn(logging.DestinationHTTP,
+			"Ignoring an unreadable job count; the confirmation it gates is off",
+			"setting", name, "value", spec)
+		return 0
+	}
+	return v
+}

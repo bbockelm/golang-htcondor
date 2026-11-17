@@ -137,6 +137,17 @@ func (s *Server) sdkToolHandler(name string) mcp.ToolHandler {
 		if len(args) == 0 {
 			args = json.RawMessage(`{}`)
 		}
+
+		// What this client can be asked, and whatever it has already
+		// answered. ClientCapabilities reads the per-request _meta on
+		// the 2026-07-28 protocol and falls back to the initialize
+		// params on the older ones, so one call covers both; the
+		// built-in transport records nothing and so can ask nobody.
+		// See confirm.go.
+		support := elicitSupportFromCapabilities(req.ClientCapabilities())
+		support.Responses = req.Params.InputResponses
+		ctx = withElicitSupport(ctx, support)
+		ctx = withConfirmState(ctx, req.Params.RequestState)
 		params, err := json.Marshal(struct {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
@@ -161,6 +172,19 @@ func (s *Server) sdkToolHandler(name string) mcp.ToolHandler {
 		result, err := s.handleCallTool(ctx, params)
 		switch {
 		case err == nil:
+			// A tool that wants a person's approval returns the
+			// question rather than a result. Turned into an
+			// input-required result here, which is the only place
+			// that can: the SDK sets the result type itself once
+			// InputRequests is non-nil, and for a client too old for
+			// multi-round-trip its own middleware fulfils the
+			// request and calls this handler again with the answer.
+			if ask, ok := result.(*confirmationRequired); ok {
+				return &mcp.CallToolResult{
+					InputRequests: mcp.InputRequestMap{confirmRequestID: ask.Params},
+					RequestState:  ask.State,
+				}, nil
+			}
 			return toSDKResult(result)
 		case isProtocolError(err):
 			// Malformed request: no tool ran, so there is no tool result.

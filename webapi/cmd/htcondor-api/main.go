@@ -178,6 +178,13 @@ type mcpConfig struct {
 	// readOnly is HTTP_API_MCP_READ_ONLY: serve MCP, but serve nothing
 	// through it that changes anything.
 	readOnly bool
+	// confirmSubmitOver and confirmRemoveOver are
+	// HTTP_API_MCP_CONFIRM_SUBMIT_OVER and
+	// HTTP_API_MCP_CONFIRM_REMOVE_OVER: the job counts above which the
+	// submit and remove tools ask the person running the client to
+	// confirm. Zero is off, and is the default.
+	confirmSubmitOver int
+	confirmRemoveOver int
 	// disableSecretRedaction is HTTP_API_MCP_REDACT_SECRETS = false.
 	// Negative so the zero value is the protective one.
 	disableSecretRedaction bool
@@ -1757,6 +1764,16 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 			"MCP is read-only by configuration (HTTP_API_MCP_READ_ONLY); no tool that changes anything will be offered or accepted")
 	}
 
+	config.confirmSubmitOver = mcpConfirmOver(cfg, "HTTP_API_MCP_CONFIRM_SUBMIT_OVER")
+	config.confirmRemoveOver = mcpConfirmOver(cfg, "HTTP_API_MCP_CONFIRM_REMOVE_OVER")
+	if config.confirmSubmitOver > 0 || config.confirmRemoveOver > 0 {
+		logger.Info(logging.DestinationMCP,
+			"MCP will ask the person running the client to confirm bulk job operations",
+			"submit_over", config.confirmSubmitOver,
+			"remove_over", config.confirmRemoveOver,
+			"note", "this needs client elicitation support; a client that cannot be asked proceeds unasked, logged at WARN, so this is a prompt and not a limit")
+	}
+
 	loadMCPRedaction(cfg, &config)
 
 	if instructions, ok := cfg.Get("MCP_INSTRUCTIONS"); ok && instructions != "" {
@@ -2629,6 +2646,8 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		MCPInstructions:            mcpCfg.instructions,
 		MCPDisabledTools:           mcpCfg.disabledTools,
 		MCPReadOnly:                mcpCfg.readOnly,
+		MCPConfirmSubmitOver:       mcpCfg.confirmSubmitOver,
+		MCPConfirmRemoveOver:       mcpCfg.confirmRemoveOver,
 		MCPDisableSecretRedaction:  mcpCfg.disableSecretRedaction,
 		MCPRedactDisabledRules:     mcpCfg.redactDisabledRules,
 		MCPSkillsDir:               mcpCfg.skillsDir,
@@ -3821,6 +3840,26 @@ func mcpReadOnly(cfg *config.Config) bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(raw))
 	if err != nil {
 		log.Fatalf("invalid HTTP_API_MCP_READ_ONLY=%q: must be a boolean", raw)
+	}
+	return v
+}
+
+// mcpConfirmOver reads a job count above which an MCP tool asks the
+// person running the client to confirm.
+//
+// Default 0 -- no gate -- for an absent or empty setting. Unparseable or
+// negative is fatal rather than ignored, for the reason the read-only
+// setting is: an operator who wrote this meant to put a limit in place,
+// and a daemon that comes up having quietly decided there is no limit is
+// the one failure this setting exists to prevent.
+func mcpConfirmOver(cfg *config.Config, name string) int {
+	raw, ok := cfg.Get(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v < 0 {
+		log.Fatalf("invalid %s=%q: must be a non-negative number of jobs (0 turns the confirmation off)", name, raw)
 	}
 	return v
 }
