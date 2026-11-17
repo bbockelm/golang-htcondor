@@ -125,9 +125,43 @@ unparser and the evaluator, which resolves it against the outermost ad of the
 chain and does not fall through on a miss. The seed is a parity case from
 v0.33.3 on.
 
+## C++ gives up on a deeply nested expression, twice over
+
+Reached through `$EVAL`, and recorded as a divergence class rather than fixed.
+
+C++ has two caps, and both are visible from outside:
+
+| shape | last value C++ returns | first it gives up on | cap |
+|---|---|---|---|
+| `!!!...true` | 400 | 401 | evaluator |
+| `1+1+1+...+1` | 400 | 401 | evaluator |
+| `true?true?...:2:2` | 400 | 401 | evaluator |
+| `((((...1...))))` | 165 | 166 | parser |
+
+The evaluator cap is `EvalState::MAX_CLASSAD_RECURSION = 400`
+(`src/classad/classad/exprTree.h`), charged one level per `Operation` node by
+the `RecursionGuard` in `operators.cpp`; past it `Operation::_Evaluate`
+returns false. The parser cap is `MAX_PARSER_DEPTH = 500`
+(`src/classad/source.cpp`), charged per recursive-descent frame, which nested
+parens spend about three of each. Either way `$EVAL` has no value to use, and
+`config.cpp` falls back to the macro-expanded body -- the empty string for a
+body with no `$` in it. Go's parser is table-driven with its stack on the heap
+and its evaluator stops at `maxEvalDepth = 2000`, so it returns the value.
+
+The binary chain is what tells the two caps apart. `parseAdditiveExpression`
+builds a left-associative chain in a WHILE LOOP, so the parser never goes deep
+-- and the cut-off is still 401. The class first recorded this as the parser's
+500 minus what the enclosing `$EVAL` had already spent; that was wrong.
+
+Not fixed. Matching would mean lowering Go's evaluator limit to 400 AND giving
+it a way to report that evaluation FAILED rather than produced ERROR, since
+C++ renders a genuine error value as `error` and renders this as nothing. That
+is a change in the ClassAd library this parser sits on, and it would make the
+library refuse expressions it handles today for the sake of input no config
+file contains.
+
 Still open in the library and reachable through `$EVAL`, but not yet hit by the
-fuzzer in CI-length runs: libclassad stops evaluating 400 levels deep (Go:
-2000), so deeply nested expressions differ; Go changes the case of non-ASCII
-letters in `toUpper`/`toLower`/`stricmp`/`stringListIMember` where libclassad
-does not; `regexps`/`replace`/`replaceAll` substitution rules; a bare `MY`
-evaluates to the ad in libclassad but to undefined in Go.
+fuzzer in CI-length runs: Go changes the case of non-ASCII letters in
+`toUpper`/`toLower`/`stricmp`/`stringListIMember` where libclassad does not;
+`regexps`/`replace`/`replaceAll` substitution rules; a bare `MY` evaluates to
+the ad in libclassad but to undefined in Go.

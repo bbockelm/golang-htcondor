@@ -340,70 +340,202 @@ func cppKeepsSomeUnaryMinus(goTable, cppTable string) bool {
 
 func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// parserDepth is the limit recorded against a very long chain of unary
-// operators inside a macro function, e.g. `0=$EVAL(!!!...!!”)`.
+// nestingDepth is the limit recorded against an expression nested deeper
+// than C++ will go, e.g. `0=$EVAL(!!!...!!”)` or `0=$EVAL(1+1+1+...+1)`.
 //
-// C++'s ClassAd parser is recursive descent, so every nested operator is a C
-// stack frame, and src/classad/source.cpp caps the nesting at
-// MAX_PARSER_DEPTH = 500 to keep deep input from overflowing the stack.
-// Past it the parse FAILS, and a macro function whose argument does not parse
-// expands to nothing. Go's parser is table-driven (goyacc) with its stack on
-// the heap, so it has no such frame to run out of: it parses the chain and
+// C++ gives up on deep expressions twice over, and both caps are reached
+// through `$EVAL`:
+//
+//   - The EVALUATOR stops at EvalState::MAX_CLASSAD_RECURSION = 400
+//     (src/classad/classad/exprTree.h), charged one level per Operation node
+//     by the RecursionGuard in operators.cpp. Past it Operation::_Evaluate
+//     returns false.
+//   - The PARSER stops at MAX_PARSER_DEPTH = 500 (src/classad/source.cpp),
+//     charged per recursive-descent frame, so the parse fails.
+//
+// Either way `$EVAL` has no value to use, and config.cpp falls back to the
+// macro-expanded body -- which for a body with no `$` in it is the empty
+// string. Go's parser is table-driven with its stack on the heap and its
+// evaluator stops at maxEvalDepth = 2000, so it parses the expression,
 // evaluates it, and `$EVAL` returns the value.
 //
-// This is recorded rather than implemented because the limit is an artifact
-// of how the C++ parser is BUILT, not a rule of the language. The cut-off is
-// not even 500 operators -- it is 500 minus whatever the enclosing expression
-// already consumed, which for `$EVAL(...)` lands at 401 -- so matching it
-// would mean reproducing the shape of C++'s call chain, and would move with
-// any refactor of it. A limit on Go's side would be a defensible thing to
-// have for its own sake, but it would be a different limit at a different
-// place, and it would not make these two agree.
+// Which cap bites depends on the shape, and the two are far enough apart to
+// tell apart by measurement:
 //
-// Defined by what was WRITTEN, like tripleQuote: once the depth is exceeded
-// the whole argument is gone, so the two tables can differ in any way at all.
-// That is safe here because the trigger cannot occur by accident.
-var parserDepth = divergenceClass{
-	name:  "C++ refuses to parse past its recursive-descent depth limit",
-	input: hasDeepOperatorChain,
+//	!!!...true          evaluates at 400, fails at 401   (evaluator)
+//	1+1+1+...+1         evaluates at 400, fails at 401   (evaluator)
+//	true?true?...:2:2   evaluates at 400, fails at 401   (evaluator)
+//	((((...1...))))     evaluates at 165, fails at 166   (parser)
+//
+// The binary chain settles it. parseAdditiveExpression builds a left-
+// associative chain in a WHILE LOOP, so the parser never goes deep -- yet
+// the cut-off is the same 401 as the unary chain, which is the evaluator's
+// 400 and not, as this class first recorded, the parser's 500 minus what the
+// enclosing $EVAL had already spent. Parens do recurse in the parser, about
+// three frames each, and show the 500 cap on its own at 166.
+//
+// Recorded rather than reproduced. Matching would mean lowering the Go
+// evaluator's limit to 400 AND giving it a way to report that evaluation
+// FAILED rather than produced ERROR, since C++ renders a genuine error value
+// as `error` and renders this as nothing -- a change in the ClassAd library
+// this parser sits on, which would make it refuse expressions it handles
+// today for the sake of input no config file contains.
+//
+// Defined by what was WRITTEN, like tripleQuote: once C++ gives up the whole
+// argument is gone, so the two tables can differ in any way at all.
+var nestingDepth = divergenceClass{
+	name:  "C++ gives up on an expression nested deeper than it will go",
+	input: hasDeepNesting,
 }
 
-// deepOperatorChain is where hasDeepOperatorChain starts calling a run of
-// stacked unary operators deep.
+// The two counts hasDeepNesting compares against, each set just under the
+// cut-off measured for the cap it stands for: 166 openers for the parser,
+// 401 operators for the evaluator.
 //
-// Deliberately well below the 401 that was measured for `$EVAL`, because the
-// cut-off depends on how deep the chain already sits when it starts, and a
-// chain somewhere more nested reaches the limit sooner. Being low costs
-// nothing: a class is only ever consulted about an input that ALREADY
-// diverged, so a chain this long that both sides handle is never excused by
-// it, and no config file written by a person has a run of 200 operators.
-const deepOperatorChain = 200
+// The old class used a threshold at half its cut-off on the argument that
+// being low cost nothing. It does now. That predicate demanded an unbroken
+// run of unary operators, which no config contains at any length; this one
+// counts chains that ordinary expressions do have, and
+// TestDivergenceClassesRejectOtherShapes holds a 300-operator chain that C++
+// evaluates perfectly well and that must stay reportable. So the margin is
+// small, and deliberately so. What it costs: a chain of 390 to 400, or a
+// nesting of 160 to 165, is excused although C++ handles it -- but only if
+// that input ALSO diverges, since a class is never consulted about anything
+// else.
+const (
+	deepBrackets = 160
+	deepChain    = 390
+)
 
-// hasDeepOperatorChain reports whether s stacks that many unary operators.
-// Only the unary operators count: these are the ones that nest without
-// anything between them, so a run of them in the source is a run of nested
-// expressions, which is not true of any binary operator.
+// hasDeepNesting reports whether any line of s is nested deeply enough to
+// reach one of C++'s two caps.
 //
-// Whitespace between them does not break the run. `! ! !0` is three nested
-// expressions exactly as `!!!0` is, and it reaches the same limit in the same
-// place -- the fuzzer found the spaced form the same night, and a predicate
-// that counted only adjacent characters reported it as something new.
-func hasDeepOperatorChain(s string) bool {
-	run := 0
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '!', '~', '-', '+':
-			run++
-			if run >= deepOperatorChain {
-				return true
-			}
-		case ' ', '\t', '\r', '\n':
-			// does not nest, does not interrupt
-		default:
-			run = 0
+// Two counts, because the caps are charged against different things. Nested
+// brackets are counted by how many are open at once, which is what the
+// recursive-descent parser spends frames on. Operators are counted by chain
+// length: a run of them with at most one operand between consecutive ones,
+// which is what nests into the Operation tree the evaluator walks. `!!!!`
+// nests with nothing between the operators; `1+1+1` and `true?true?` nest
+// with one operand between each pair, and are the shapes that reach the
+// evaluator cap while the parser stays shallow -- parseAdditiveExpression
+// builds a left-associative chain in a loop.
+//
+// Anything else ends a chain: a closing bracket, a comma, a second operand
+// in a row, a `$`, punctuation. That is what keeps the count from standing
+// for scattered operator characters -- an ordinary `START = (A > 1) && (B <
+// 2) && ...` scores 2, because each `)` ends the chain it is in -- and it is
+// why both counts are per line, since config is line-oriented and an
+// expression lives on one.
+//
+// Whitespace between operators does not break a chain: `! ! !0` is three
+// nested expressions exactly as `!!!0` is. All six bytes C calls space
+// count, the vertical tab among them. The fuzzer reached this class the
+// first time with spaces, which an earlier predicate counting only adjacent
+// characters missed, and reached it again with vertical tabs breaking the
+// run into pieces of 152, 183 and 66 -- a 401-deep chain that scored 183.
+func hasDeepNesting(s string) bool {
+	for len(s) > 0 {
+		line := s
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			line, s = s[:i], s[i+1:]
+		} else {
+			s = ""
+		}
+		brackets, chain := nestingCounts(line)
+		if brackets >= deepBrackets || chain >= deepChain {
+			return true
 		}
 	}
 	return false
+}
+
+// nestingCounts returns the most brackets open at once on one line and the
+// longest operator chain on it. See hasDeepNesting for what each counts.
+func nestingCounts(line string) (brackets, chain int) {
+	open, run := 0, 0
+	operand := false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case isClassAdSpace(c):
+			// does not nest, does not interrupt
+		case c == '(' || c == '{' || c == '[':
+			open++
+			if open > brackets {
+				brackets = open
+			}
+			run, operand = 0, false
+		case c == ')' || c == '}' || c == ']':
+			if open > 0 {
+				open--
+			}
+			run, operand = 0, false
+		case isChainOperator(c):
+			run++
+			operand = false
+			if run > chain {
+				chain = run
+			}
+		case c == '"' || c == '\'':
+			// A string literal is one operand however many operator
+			// characters are written inside it. Skipping it is what keeps
+			// a line of quoted text from reading as a deep expression.
+			end := endOfLiteral(line, i)
+			if operand {
+				run = 0
+			}
+			i, operand = end, true
+		case isOperandByte(c):
+			// one operand between two operators keeps the chain; a
+			// second one in a row is two expressions side by side.
+			if operand {
+				run, operand = 0, false
+				continue
+			}
+			for i+1 < len(line) && isOperandByte(line[i+1]) {
+				i++
+			}
+			operand = true
+		default:
+			run, operand = 0, false
+		}
+	}
+	return brackets, chain
+}
+
+// isClassAdSpace reports whether b is one of the six bytes C's isspace()
+// accepts in the C locale, which is what the ClassAd lexer skips.
+func isClassAdSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+}
+
+// isChainOperator reports whether b begins an expression that holds another.
+// Brackets are counted separately, against the parser's cap.
+func isChainOperator(b byte) bool {
+	return strings.IndexByte("!~+-*/%<>=&|^?:", b) >= 0
+}
+
+// isOperandByte reports whether b can appear in a bare operand -- an
+// identifier or a number. A quoted string is handled separately, by
+// endOfLiteral.
+func isOperandByte(b byte) bool {
+	return b == '_' || b == '.' || isASCIIDigit(b) ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// endOfLiteral returns the index of the quote closing the literal that opens
+// at i, or the last index of the line when nothing closes it. A backslash
+// escapes the next byte, as it does in the ClassAd lexer.
+func endOfLiteral(line string, i int) int {
+	q := line[i]
+	for j := i + 1; j < len(line); j++ {
+		switch line[j] {
+		case '\\':
+			j++
+		case q:
+			return j
+		}
+	}
+	return len(line) - 1
 }
 
 // recognize returns the recorded class that accounts for this divergence, or
@@ -574,16 +706,13 @@ var seeds = []seedCase{
 		// Found by FuzzConfigParseExpand. Not drift: it reproduces against
 		// the pinned 25.14 oracle too, at the same 401.
 		input: "0=$EVAL(" + strings.Repeat("!", 401) + "'')",
-		reason: "C++'s ClassAd parser is recursive descent and caps nesting at " +
-			"MAX_PARSER_DEPTH = 500 (src/classad/source.cpp) so that deep input " +
-			"cannot overflow the C stack. Past the cap the parse fails and $EVAL " +
-			"expands to nothing; Go's parser is table-driven with its stack on " +
-			"the heap, parses the chain, and evaluates it to UNDEFINED. The cap " +
-			"is a property of how that parser is built rather than of the " +
-			"language -- the cut-off here is 401 rather than 500 because the " +
-			"enclosing $EVAL has already spent the rest -- so it is recorded " +
-			"rather than reproduced.",
-		class: &parserDepth,
+		reason: "libclassad stops evaluating at MAX_CLASSAD_RECURSION = 400 " +
+			"(src/classad/classad/exprTree.h), charged one level per Operation " +
+			"node, so at 401 Operation::_Evaluate returns false, $EVAL has no " +
+			"value to use and expands to nothing. Go's evaluator stops at 2000, " +
+			"so it evaluates the chain to UNDEFINED. Recorded rather than " +
+			"reproduced: see nestingDepth.",
+		class: &nestingDepth,
 	},
 
 	{
@@ -591,8 +720,51 @@ var seeds = []seedCase{
 		// nests identically. Kept as a seed because the first version of
 		// the predicate counted only adjacent characters and missed it.
 		input:  "0=$EVAL(" + strings.Repeat(strings.Repeat("!", 120)+" ", 4) + "'')",
-		reason: "parserDepth, reached with whitespace between the operators",
-		class:  &parserDepth,
+		reason: "nestingDepth, reached with whitespace between the operators",
+		class:  &nestingDepth,
+	},
+
+	{
+		// Found by FuzzConfigParseExpand, and the reason this class was
+		// generalized: 401 operators again, but broken into runs of 152,
+		// 183 and 66 by vertical tabs. The lexer skips a vertical tab like
+		// any other space, so the chain nests all 401 deep, while a
+		// predicate that treated it as a break scored the input 183 and
+		// reported a recorded divergence as a new one.
+		input: "0=$EVAL(" + strings.Repeat("!", 152) + "\v" +
+			strings.Repeat("!", 183) + "\v" + strings.Repeat("!", 66) + "'')",
+		reason: "nestingDepth, reached with vertical tabs between the operators",
+		class:  &nestingDepth,
+	},
+
+	{
+		// The evaluator cap reached with no deep parse at all.
+		// parseAdditiveExpression builds a left-associative chain in a
+		// while loop, so C++'s recursive-descent parser stays shallow here
+		// -- and the cut-off is still 401, which is what tells the
+		// evaluator's cap apart from the parser's.
+		input:  "0=$EVAL(1" + strings.Repeat("+1", 401) + ")",
+		reason: "nestingDepth, reached by a left-associative binary chain",
+		class:  &nestingDepth,
+	},
+
+	{
+		// The same cap through a ternary chain, which nests with an
+		// operand between each pair of operators.
+		input: "A=" + strings.Repeat("true?", 401) + "1" + strings.Repeat(":2", 401) +
+			"\n0=$EVAL(A)",
+		reason: "nestingDepth, reached by a ternary chain",
+		class:  &nestingDepth,
+	},
+
+	{
+		// The PARSER cap, which parens reach on their own at about three
+		// frames each -- 166, well before the evaluator's 400.
+		input: "A=" + strings.Repeat("(", 166) + "1" + strings.Repeat(")", 166) +
+			"\n0=$EVAL(A)",
+		reason: "nestingDepth, reached by nested parentheses against " +
+			"MAX_PARSER_DEPTH = 500 rather than the evaluator's 400",
+		class: &nestingDepth,
 	},
 
 	// --- former divergences, fixed; each checked against condor 25.14.1 ---
@@ -784,6 +956,75 @@ func FuzzConfigParseExpand(f *testing.F) {
 	})
 }
 
+// firstLongLine returns the line of s with the most nesting on it, for a
+// failure message that names the counts that decided the case.
+func firstLongLine(s string) string {
+	best, bestScore := "", -1
+	for _, line := range strings.Split(s, "\n") {
+		b, c := nestingCounts(line)
+		if b+c > bestScore {
+			best, bestScore = line, b+c
+		}
+	}
+	return best
+}
+
+// TestDeepNestingPredicate pins hasDeepNesting from both sides. A class
+// defined by what was written is only as good as its predicate: too narrow
+// and the nightly reports a recorded divergence as a new one, which is how
+// this class was widened twice; too wide and it excuses a real bug that
+// happens to arrive on a line with operators on it.
+//
+// The deep cases are the shapes measured against the oracle, each at the
+// count where C++ gives up. The ordinary ones are what config looks like.
+func TestDeepNestingPredicate(t *testing.T) {
+	deep := map[string]string{
+		"unary chain":  "0=$EVAL(" + strings.Repeat("!", 401) + "true)",
+		"spaced unary": "0=$EVAL(" + strings.Repeat("! ", 401) + "true)",
+		"vertical tabs": "0=$EVAL(" + strings.Repeat("!", 152) + "\v" +
+			strings.Repeat("!", 183) + "\v" + strings.Repeat("!", 66) + "'')",
+		// 405 operators in runs of 81, so only counting ACROSS the vertical
+		// tabs reaches the cap. The nightly's own input has a run of 183 in
+		// it and would be called deep even by a predicate that stopped at
+		// each tab.
+		"vertical tabs, no long run": "0=$EVAL(" +
+			strings.Repeat(strings.Repeat("!", 81)+"\v", 5) + "'')",
+		"binary chain":     "0=$EVAL(1" + strings.Repeat("+1", 401) + ")",
+		"ternary chain":    "A=" + strings.Repeat("true?", 401) + "1" + strings.Repeat(":2", 401),
+		"nested parens":    "A=" + strings.Repeat("(", 166) + "1" + strings.Repeat(")", 166),
+		"nested lists":     "A=" + strings.Repeat("{", 166) + "1" + strings.Repeat("}", 166),
+		"deep on line two": "A = 1\nB=$EVAL(" + strings.Repeat("!", 401) + "true)\n",
+	}
+	for name, in := range deep {
+		if !hasDeepNesting(in) {
+			b, c := nestingCounts(firstLongLine(in))
+			t.Errorf("%s: not called deep (brackets %d, chain %d)", name, b, c)
+		}
+	}
+
+	ordinary := map[string]string{
+		"a long requirements": "START = (Owner == \"alice\") && (Memory > 1024) && " +
+			"(Disk > 100) && (Cpus >= 2) && (OpSys == \"LINUX\")\n",
+		"operators packed together": "R = (A>1)&&(B<2)&&(C==3)&&(D!=4)&&(E>=5)&&(F<=6)&&(G=?=7)\n",
+		"a path list":               "PATH = /a/b/c:/d/e/f:/g/h/i:/j/k/l\n",
+		"many short expressions":    strings.Repeat("X = (a+b) * (c-d) / (e%f)\n", 200),
+		"operator characters in quoted text": "Y = " +
+			strings.Repeat("\"a+b?c:d\" ", 100) + "\n",
+		// one string literal, and every operator character is inside it,
+		// in a chain past the threshold so that skipping the literal is
+		// what decides the case
+		"an operator chain inside a string": "Y = \"" +
+			strings.Repeat("+a", 400) + "\"\n",
+		"a run of macro references": strings.Repeat("$(A)", 200) + "\n",
+	}
+	for name, in := range ordinary {
+		if hasDeepNesting(in) {
+			b, c := nestingCounts(firstLongLine(in))
+			t.Errorf("%s: called deep (brackets %d, chain %d)", name, b, c)
+		}
+	}
+}
+
 // TestDivergenceClassesMatchTheirSeeds runs each classed seed and checks that
 // its own class recognizes the divergence it produces. Without this a matcher
 // could drift until it matches nothing, and the fuzzer would go back to
@@ -844,11 +1085,13 @@ func TestDivergenceClassesRejectOtherShapes(t *testing.T) {
 		{"an empty quoted name", `A=$EVAL('')`, "A\x1f\n", "A\x1fy\n"},
 		// Three quotes, but not three of the SAME quote: not a marker.
 		{"mixed quotes", "A=\"'\"'", "A\x1f\n", "A\x1fy\n"},
-		// A few stacked operators are ordinary; only a run long enough to
-		// reach C++'s parser depth limit is the recorded family.
+		// A few stacked operators are ordinary; only a chain long enough
+		// to reach one of C++'s caps is the recorded family.
 		{"a short operator chain", "A=$EVAL(!!!!0)", "A\x1f0\n", "A\x1f1\n"},
-		// Long, but not a CHAIN: the operators are separated, so nothing
-		// nests and no parser runs out of depth.
+		// Long, and it does nest -- 300 subtractions is a 300-deep
+		// left-associative tree -- but C++ evaluates 400 levels, so this
+		// one it gets right and a disagreement about it is a real finding.
+		// The case the thresholds are set against.
 		{"many operators, not stacked", "A=$EVAL(" + strings.Repeat("0-", 300) + "0)", "A\x1f0\n", "A\x1f1\n"},
 		// The unary-minus fold rewrites the C++ side only, and only a space
 		// before a '-' that a digit follows. None of these is that shape.
