@@ -416,3 +416,58 @@ func TestCCBBrokerKeyIsOrderIndependent(t *testing.T) {
 		t.Errorf("keys differ by broker order: %q vs %q", a, b)
 	}
 }
+
+// TestCCBDialerFallsBackWhenTheReversedConnectionBreaks covers the shape
+// reported from a Kubernetes API server behind a hostPort: the execute node
+// reached the shared port, the reverse connection came up, and then the
+// handshake over it died. That is the one thing the two modes do not share, so
+// the broker-relayed path is worth a try.
+func TestCCBDialerFallsBackWhenTheReversedConnectionBreaks(t *testing.T) {
+	router := &fakeRouter{}
+	defer router.closeAll()
+	broken := fmt.Errorf("failed to connect and authenticate: %w", &security.SessionResumptionError{
+		SessionID: "46c84a6f",
+		Reason:    "failed to receive resumption response",
+		Cause:     io.ErrUnexpectedEOF,
+	})
+	seen := interceptDials(t, broken, nil)
+
+	d := newTestDialer(router, true)
+	if _, err := d.Dial(context.Background(), ccbTestAddr, nil, nil); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	if len(*seen) != 2 {
+		t.Fatalf("made %d dials, want 2 (reverse then streaming): %+v", len(*seen), *seen)
+	}
+	if !(*seen)[1].streaming || (*seen)[1].reverse {
+		t.Errorf("second attempt = %+v, want streaming", (*seen)[1])
+	}
+}
+
+// TestCCBDialerDoesNotRetryASessionTheTargetRefused is the other half of it. A
+// peer that answers "I have no such session" is stating a fact about the
+// session, not about the path the connection took, and the broker-relayed mode
+// reaches the same peer with the same session. Retrying only doubles the wait
+// and buries the reason.
+func TestCCBDialerDoesNotRetryASessionTheTargetRefused(t *testing.T) {
+	router := &fakeRouter{}
+	defer router.closeAll()
+	refused := fmt.Errorf("failed to connect and authenticate: %w", &security.SessionResumptionError{
+		SessionID: "46c84a6f",
+		Reason:    "session not found on server",
+	})
+	seen := interceptDials(t, refused, nil)
+
+	d := newTestDialer(router, true)
+	_, err := d.Dial(context.Background(), ccbTestAddr, nil, nil)
+	if err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+	if !errors.Is(err, refused) {
+		t.Errorf("error = %v, want it to carry the target's refusal", err)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("made %d dials, want 1: the other mode reaches the same peer: %+v", len(*seen), *seen)
+	}
+}

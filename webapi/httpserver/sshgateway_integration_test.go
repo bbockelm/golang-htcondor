@@ -146,6 +146,11 @@ queue
 		KEKFilePath:              writeKEK(t, t.TempDir()),
 		EnableMCP:                true,
 		SSHGatewayAddress:        "127.0.0.1:0",
+		// The gateway has to name itself: its host certificate lists
+		// this, and a certificate naming nothing is no longer a
+		// certificate good for every name. 127.0.0.1 is what these
+		// tests actually dial.
+		SSHGatewayPublicHost: "127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -305,6 +310,11 @@ MEMORY = 8192
 		KEKFilePath:              writeKEK(t, t.TempDir()),
 		EnableMCP:                true,
 		SSHGatewayAddress:        "127.0.0.1:0",
+		// The gateway has to name itself: its host certificate lists
+		// this, and a certificate naming nothing is no longer a
+		// certificate good for every name. 127.0.0.1 is what these
+		// tests actually dial.
+		SSHGatewayPublicHost: "127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -463,6 +473,11 @@ func TestSSHGatewayRefusesSomeoneElsesJob(t *testing.T) {
 		KEKFilePath:              writeKEK(t, t.TempDir()),
 		EnableMCP:                true,
 		SSHGatewayAddress:        "127.0.0.1:0",
+		// The gateway has to name itself: its host certificate lists
+		// this, and a certificate naming nothing is no longer a
+		// certificate good for every name. 127.0.0.1 is what these
+		// tests actually dial.
+		SSHGatewayPublicHost: "127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -729,6 +744,11 @@ queue
 		KEKFilePath:              writeKEK(t, t.TempDir()),
 		EnableMCP:                true,
 		SSHGatewayAddress:        "127.0.0.1:0",
+		// The gateway has to name itself: its host certificate lists
+		// this, and a certificate naming nothing is no longer a
+		// certificate good for every name. 127.0.0.1 is what these
+		// tests actually dial.
+		SSHGatewayPublicHost: "127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

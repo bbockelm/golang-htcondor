@@ -336,10 +336,28 @@ func (d *CCBDialer) plan(broker string) []ccbMode {
 func fallbackWorthwhile(mode ccbMode, err error) bool {
 	switch mode {
 	case ccbModeReverse, ccbModeDefault:
-		// Only a target that could not reach us. A broker that rejected our
-		// credentials or could not be dialed at all will reject a proxy
-		// request the same way, and retrying buries the real reason.
-		return errors.Is(err, ccb.ErrReverseConnect)
+		// A target that could not reach us -- the failure this mode exists to
+		// have an answer for. A broker that rejected our credentials or could
+		// not be dialed at all will reject a proxy request the same way, and
+		// retrying buries the real reason.
+		if errors.Is(err, ccb.ErrReverseConnect) {
+			return true
+		}
+		// Or a target that did reach us and then did not finish the exchange.
+		// The reversed connection is the one thing these two modes do not
+		// share: it crosses whatever sits between the execute node and this
+		// process -- a NAT, a container port mapping, a Kubernetes hostPort --
+		// on a path the broker-relayed mode never touches. A resumption that
+		// broke mid-exchange says nothing about the session itself, so it is
+		// worth one try down the other path.
+		//
+		// A Cause is what distinguishes the two. The peer answering "I have no
+		// such session" is a fact about the session, shared by both modes and
+		// carrying no Cause; an EOF, a reset or a short read while talking to
+		// it is a fact about this connection, and carries the I/O error that
+		// ended it.
+		var resumption *security.SessionResumptionError
+		return errors.As(err, &resumption) && resumption.Cause != nil
 	case ccbModeStreaming:
 		// Only a broker too old to relay. Everything else is shared.
 		var unsupported *ccb.StreamingUnsupportedError

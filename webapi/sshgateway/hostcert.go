@@ -53,18 +53,33 @@ const hostCertLifetime = 10 * 365 * 24 * time.Hour
 // under a client like VS Code's Remote-SSH that shows the prompt
 // nowhere useful, reads as a connection that hangs for no reason.
 //
-// principals are the names the certificate is good for. EMPTY means
-// every name, which is what OpenSSH does with a host certificate that
-// lists none, and is the right default here because this process does
-// not know the names it is reached by: it binds `:2222` and is fronted
-// by whatever the operator put in front of it. An operator who does
-// know can narrow it.
+// principals are the names the certificate is good for, and at least
+// one is required.
+//
+// This used to accept none, meaning every name -- what OpenSSH does
+// with a host certificate that lists no principals. That wildcard is
+// gone: golang.org/x/crypto v0.59.0 refuses to sign a certificate with
+// an empty ValidPrincipals, and its CertChecker matches principals
+// exactly rather than treating an empty list as a match for anything.
+// A gateway that cannot name itself now says so at startup instead of
+// minting a certificate good for every host on the internet.
 func NewHostCertSigner(host, ca ssh.Signer, principals []string, now time.Time) (ssh.Signer, error) {
 	if host == nil {
 		return nil, errors.New("sshgateway: no host key to certify")
 	}
 	if ca == nil {
 		return nil, errors.New("sshgateway: no certificate authority configured")
+	}
+	// Checked here as well as by SignCert so the error names this
+	// package and the thing the caller got wrong, rather than surfacing
+	// as "ssh: certificate has no principals" from two layers down.
+	if len(principals) == 0 {
+		return nil, errors.New("sshgateway: a host certificate needs at least one principal: the name(s) clients reach this gateway by")
+	}
+	for _, p := range principals {
+		if strings.TrimSpace(p) == "" {
+			return nil, errors.New("sshgateway: a host certificate principal is empty")
+		}
 	}
 
 	serial, err := hostCertSerial()
