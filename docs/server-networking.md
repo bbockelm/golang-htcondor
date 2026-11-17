@@ -70,10 +70,15 @@ HTTP_API_SHARED_PORT_ADDRESS = htcondor-api.example.org:9618
 
 With it set, connection reversal through that port is tried first, because it
 works with every broker version. If the execute node turns out not to be able
-to reach it after all, the server falls back to streaming (unless
+to reach it after all -- or reaches it and then the connection breaks partway
+through the handshake, which is what a NAT or a hostPort in the middle looks
+like -- the server falls back to streaming (unless
 `HTTP_API_CCB_STREAMING = false`), and remembers the answer per broker for
 `HTTP_API_CCB_LEARNED_TTL` so later requests do not pay the timeout again. A
-broker too old to relay is likewise remembered and not asked again.
+broker too old to relay is likewise remembered and not asked again. A failure
+that says something about the daemon rather than the path to it -- credentials
+the broker rejected, a session the execute node does not have -- is not retried
+the other way, since the other way reaches the same daemon.
 
 Open the port in the host firewall, and check the log line at startup — it
 prints the address being advertised, which is the thing that is wrong when this
