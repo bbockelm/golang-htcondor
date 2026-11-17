@@ -43,6 +43,7 @@ import (
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
 	"github.com/bbockelm/golang-htcondor/webapi/sharedportrouter"
+	"github.com/bbockelm/golang-htcondor/webapi/spool"
 )
 
 // defaultDemoCredentialsFile is where -demo writes the passwords it
@@ -709,6 +710,37 @@ func loadJupyterGraceSec(cfg *config.Config, logger *logging.Logger, name string
 				"parameter", name, "value", n, "max_seconds", ceiling)
 		}
 		return ceiling
+	}
+	return n
+}
+
+// loadSpoolMaxUploadBytes reads the ceiling on what one upload command
+// may transfer -- a PUT or POST to a job's input, a redeemed upload URL,
+// or an upload_job_input tool call. A cluster-wide call counts the tar
+// times the procs it serves, so this is the bound on the whole command
+// and not on the file.
+//
+// Returns 0 for "unset", which spool.LimitsFor reads as the package
+// default. A value that does not parse, or is not positive, warns and
+// falls back to that default rather than being taken at face value:
+// reading a typo -- or a literal 0 -- as "no ceiling" would turn one
+// bad config line into an unbounded fan-out, which is the outcome the
+// limit exists to prevent. Raising the cap means naming a bigger
+// number; there is deliberately no way to clear it.
+func loadSpoolMaxUploadBytes(cfg *config.Config, logger *logging.Logger) int64 {
+	v, ok := cfg.Get("HTTP_API_SPOOL_MAX_UPLOAD_BYTES")
+	if !ok || strings.TrimSpace(v) == "" {
+		return 0
+	}
+	n, err := spool.ParseSize(v)
+	if err != nil || n <= 0 {
+		if logger != nil {
+			logger.Warn(logging.DestinationHTTP,
+				"Ignoring HTTP_API_SPOOL_MAX_UPLOAD_BYTES; using the default",
+				"value", v, "error", err,
+				"default_bytes", spool.DefaultLimits().MaxVolume)
+		}
+		return 0
 	}
 	return n
 }
@@ -2720,6 +2752,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		UsageStatsMaxSeries:         usageStatsMaxSeries,
 		RESTStatsEnabled:            restStatsEnabled,
 		UtilizationMaxJobs:          utilizationMaxJobs,
+		SpoolMaxUploadBytes:         loadSpoolMaxUploadBytes(cfg, logger),
 		RuntimeEstimateInterval:     runtimeEstimateInterval,
 		RuntimeEstimateBackfill:     runtimeEstimateBackfill,
 		DBMirrorName:                dbMirrorName,
@@ -3136,6 +3169,7 @@ func runDemoMode(earlyBuf *logging.EarlyBuffer) error {
 			httpserver.DefaultJupyterReconnectGraceSec, httpserver.MaxJupyterReconnectGraceSec),
 		InteractiveExtraSubmit: loadInteractiveExtraSubmit(cfg),
 		TemplateGlobalPath:     loadTemplateGlobalPath(cfg),
+		SpoolMaxUploadBytes:    loadSpoolMaxUploadBytes(cfg, logger),
 		DagmanEnvironment:      demoDagmanEnvironment(configFile),
 		HTCondorConfig:         cfg,
 		// In demo mode, the auto-created `admin` IDP user is a real

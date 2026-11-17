@@ -372,6 +372,10 @@ var reconfigParams = []reconfigParam{
 	// handler is built.
 	{name: "HTTP_API_UTILIZATION_MAX_JOBS"},
 
+	// The ceiling on one upload command, copied into the handler and
+	// into the MCP server it builds, both at startup.
+	{name: "HTTP_API_SPOOL_MAX_UPLOAD_BYTES"},
+
 	// Placement onboarding, read when the handler is built.
 	{name: "HTTP_API_PLACEMENT_IDENTITY_CLAIMS"},
 	{name: "HTTP_API_PLACEMENT_DISPLAY_NAME_CLAIMS"},

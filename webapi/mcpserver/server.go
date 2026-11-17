@@ -141,6 +141,10 @@ type Server struct {
 	// utilizationMaxJobs is the most jobs one analyze_utilization call
 	// may read; zero means the package ceiling. See Config.
 	utilizationMaxJobs int
+	// spoolMaxUploadBytes is the most bytes one upload_job_input call
+	// may transfer; zero means the package default. Read through
+	// spoolLimits, never directly.
+	spoolMaxUploadBytes int64
 	// utilMachines is the pool's machine shapes for analyze_utilization's
 	// throughput estimate, shared by every caller and refreshed every
 	// utilizationMachinesTTL.
@@ -446,6 +450,13 @@ type Config struct {
 	// Utilization page); zero means a million.
 	UtilizationMaxJobs int
 
+	// SpoolMaxUploadBytes is the most bytes one upload_job_input call may
+	// transfer (HTTP_API_SPOOL_MAX_UPLOAD_BYTES, the same ceiling the REST
+	// upload uses), counting a cluster-wide fan-out as the tar times the
+	// procs it serves. Zero means the default; the stdio CLI never sets
+	// it, so zero has to mean the cap rather than none.
+	SpoolMaxUploadBytes int64
+
 	// htcondordb mirror routing, mirroring the REST handler's config of
 	// the same name so one daemon routes both surfaces identically. See
 	// dbmirror.Options.
@@ -627,39 +638,40 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		multi:              cfg.MultiAP,
-		multiConstraint:    cfg.MultiAPConstraint,
-		stats:              cfg.ToolStats,
-		clients:            newClientRegistry(),
-		schedd:             schedd,
-		scheddProvider:     cfg.ScheddProvider,
-		collector:          cfg.Collector,
-		credd:              cfg.Credd,
-		creddProvider:      cfg.CreddProvider,
-		creddFor:           cfg.CreddFor,
-		trustDomain:        cfg.TrustDomain,
-		uidDomain:          cfg.UIDDomain,
-		signingKeyPath:     cfg.SigningKeyPath,
-		httpBaseURL:        cfg.HTTPBaseURL,
-		logger:             logger,
-		stdin:              stdin,
-		stdout:             stdout,
-		adminUsers:         adminUsers,
-		htcondorConfig:     cfg.HTCondorConfig,
-		ccbDialer:          cfg.CCB,
-		delegated:          cfg.Delegated,
-		utilizationMaxJobs: cfg.UtilizationMaxJobs,
-		submitPolicy:       cfg.SubmitPolicy,
-		ensureCreds:        cfg.EnsureCredentials,
-		dagmanPath:         cfg.DagmanPath,
-		dagmanEnv:          cfg.DagmanEnvironment,
-		dbMirror:           cfg.DBMirror,
-		jobWatch:           cfg.JobWatch,
-		jobWatchEval:       cfg.JobWatchEval,
-		runtimeEst:         cfg.RuntimeEstimator,
-		watchMaxWait:       cfg.WatchMaxWait,
-		build:              buildSettingsFromConfig(cfg),
-		apPolicy:           cfg.APPolicy,
+		multi:               cfg.MultiAP,
+		multiConstraint:     cfg.MultiAPConstraint,
+		stats:               cfg.ToolStats,
+		clients:             newClientRegistry(),
+		schedd:              schedd,
+		scheddProvider:      cfg.ScheddProvider,
+		collector:           cfg.Collector,
+		credd:               cfg.Credd,
+		creddProvider:       cfg.CreddProvider,
+		creddFor:            cfg.CreddFor,
+		trustDomain:         cfg.TrustDomain,
+		uidDomain:           cfg.UIDDomain,
+		signingKeyPath:      cfg.SigningKeyPath,
+		httpBaseURL:         cfg.HTTPBaseURL,
+		logger:              logger,
+		stdin:               stdin,
+		stdout:              stdout,
+		adminUsers:          adminUsers,
+		htcondorConfig:      cfg.HTCondorConfig,
+		ccbDialer:           cfg.CCB,
+		delegated:           cfg.Delegated,
+		utilizationMaxJobs:  cfg.UtilizationMaxJobs,
+		spoolMaxUploadBytes: cfg.SpoolMaxUploadBytes,
+		submitPolicy:        cfg.SubmitPolicy,
+		ensureCreds:         cfg.EnsureCredentials,
+		dagmanPath:          cfg.DagmanPath,
+		dagmanEnv:           cfg.DagmanEnvironment,
+		dbMirror:            cfg.DBMirror,
+		jobWatch:            cfg.JobWatch,
+		jobWatchEval:        cfg.JobWatchEval,
+		runtimeEst:          cfg.RuntimeEstimator,
+		watchMaxWait:        cfg.WatchMaxWait,
+		build:               buildSettingsFromConfig(cfg),
+		apPolicy:            cfg.APPolicy,
 		// Never nil: query_pool asks the policy rather than checking for
 		// one, so an unconfigured server holds an open policy instead.
 		poolPolicy: cmpOrOpen(cfg.PoolPolicy),
