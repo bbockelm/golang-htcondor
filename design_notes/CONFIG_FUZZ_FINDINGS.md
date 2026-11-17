@@ -160,6 +160,23 @@ is a change in the ClassAd library this parser sits on, and it would make the
 library refuse expressions it handles today for the sake of input no config
 file contains.
 
+Recognizing it has been harder than measuring it. The nightly has now reported
+this one divergence as a new finding four times, each a new way of writing the
+same chain: spaces between the operators, vertical tabs between them, a quote
+in front that never closed, and a quote in front that closed at the far end.
+The first two broke the count; the last two made the whole chain vanish into a
+string literal that is not one. Config expands `$EVAL(...)` wherever it is
+written, quotes and all, so no literal can contain one -- the ClassAd text is
+the argument, and the quotes around it are macro characters C++ never reads as
+quotes. Skipping a quoted span only when no `$` is inside it covers every
+spelling seen so far, the unterminated quote included.
+
+The class now also requires that C++'s table be Go's with one run deleted,
+which is the half that does not depend on reading the nesting out of the text.
+A fifth spelling turned up in a local run within a minute of the fourth being
+fixed, which is the argument for that second half: the text predicate will go
+on being wrong, and the class should not depend on it alone.
+
 Still open in the library and reachable through `$EVAL`, but not yet hit by the
 fuzzer in CI-length runs: Go changes the case of non-ASCII letters in
 `toUpper`/`toLower`/`stricmp`/`stringListIMember` where libclassad does not;

@@ -394,10 +394,13 @@ var nestingDepth = divergenceClass{
 // of a macro function that produced nothing where Go produced a value.
 //
 // This is the half that does not depend on spotting the nesting in the text,
-// and it is here because the input predicate has now been too narrow three
-// times: spaces between the operators, vertical tabs between them, and a
-// quote before them that swallowed the line. Each time a recorded divergence
-// was reported as a new finding. With both halves required, the text
+// and it is here because the input predicate has now been too narrow four
+// times: spaces between the operators, vertical tabs between them, a quote
+// in front that never closed, and a quote in front that closed at the far
+// end. Each time a recorded divergence was reported as a new finding, and
+// the last two were the same hole a night apart -- a quote read as a string
+// literal when C++ never read it as one at all. With both halves required,
+// the text
 // predicate can be generous without the class excusing anything else, because
 // a real disagreement about a VALUE does not have this shape: `0` against `1`
 // is not `0` with a run deleted.
@@ -549,22 +552,39 @@ func nestingCounts(line string) (brackets, chain int) {
 				chain = run
 			}
 		case c == '"' || c == '\'':
-			// A CLOSED string literal is one operand however many operator
-			// characters are written inside it. Skipping it is what keeps
-			// a line of quoted text from reading as a deep expression.
+			// A CLOSED string literal with no macro function inside it is
+			// one operand, however many operator characters are written in
+			// it. Skipping it is what keeps a line of quoted text from
+			// reading as a deep expression.
 			//
-			// An unterminated quote is not a literal and must not swallow
-			// what follows it. Treating it as one is how `0=A"$EVAL(!!!...)`
-			// scored zero and was reported as a new finding: everything
-			// after the quote, the whole 401-operator chain included,
-			// disappeared into a string that never ends.
-			end, closed := endOfLiteral(line, i)
-			if !closed {
+			// Nothing else may be skipped. What gets skipped leaves both
+			// counts -- the whole rest of the line, when the quote never
+			// closes -- so a quote mistaken for a literal hides everything
+			// written after it. Two kinds are not literals, and the
+			// nightly reported each as a new finding on a night of its own:
+			//
+			//   - A quote that never closes. `0=A"$EVAL(!!!...)` scored
+			//     zero, its 401-operator chain inside a string with no end.
+			//   - A quote that closes past a macro function.
+			//     `0=a'00$EVAL(!!!...'')` and `0='$EVAL(!!!...'')` each
+			//     scored one, the chain hidden between two quotes that
+			//     look balanced.
+			//
+			// One test covers both, because the text between the quotes
+			// decides it rather than the quotes do. `$EVAL(...)` is
+			// expanded wherever it is written, quotes and all, so no
+			// literal holds one: the ClassAd text is the ARGUMENT, and the
+			// quotes around it are macro characters C++ never reads as
+			// quotes. A quote with no end spans the rest of the line, so
+			// it fails the same test as soon as a `$` follows it -- and
+			// when none does, the `$EVAL` is in front of the quote, which
+			// puts the quote inside the argument, where C++'s parse fails
+			// on the unterminated literal long before any cap and Go's
+			// fails with it. Measured: no divergence to recognize.
+			end := endOfLiteral(line, i)
+			if strings.IndexByte(line[i:end], '$') >= 0 {
 				run, operand = 0, false
 				continue
-			}
-			if operand {
-				run = 0
 			}
 			i, operand = end, true
 		case isOperandByte(c):
@@ -606,19 +626,20 @@ func isOperandByte(b byte) bool {
 }
 
 // endOfLiteral returns the index of the quote closing the literal that opens
-// at i, and whether one was found at all. A backslash escapes the next byte,
-// as it does in the ClassAd lexer.
-func endOfLiteral(line string, i int) (int, bool) {
+// at i, or i itself when the quote never closes -- an empty span, which is
+// no literal and swallows nothing. A backslash escapes the next byte, as it
+// does in the ClassAd lexer.
+func endOfLiteral(line string, i int) int {
 	q := line[i]
 	for j := i + 1; j < len(line); j++ {
 		switch line[j] {
 		case '\\':
 			j++
 		case q:
-			return j, true
+			return j
 		}
 	}
-	return i, false
+	return i
 }
 
 // recognize returns the recorded class that accounts for this divergence, or
@@ -828,6 +849,26 @@ var seeds = []seedCase{
 		// the end of the line and so counted nothing at all.
 		input:  "0=A\"$EVAL(" + strings.Repeat("!", 401) + "'')",
 		reason: "nestingDepth, behind a quote that never closes",
+		class:  &nestingDepth,
+	},
+
+	{
+		// Found by FuzzConfigParseExpand the night after that one, the
+		// same hole through the other door: here the quote DOES close, on
+		// the `''` at the far end, so the literal swallowed the chain
+		// between them. It is not a literal -- it opens straight after the
+		// `a`, and ClassAd has no two operands in a row.
+		input:  "0=a'00$EVAL(" + strings.Repeat("!", 401) + "'')",
+		reason: "nestingDepth, behind a quote that closes at the far end",
+		class:  &nestingDepth,
+	},
+
+	{
+		// The same hole with the quote in operand position, where a
+		// literal CAN open -- so it is the `$EVAL` between the two quotes
+		// that says this is not one, not where the first quote sits.
+		input:  "0='$EVAL(" + strings.Repeat("!", 401) + "'')",
+		reason: "nestingDepth, behind a quote that opens a value and closes at the far end",
 		class:  &nestingDepth,
 	},
 
@@ -1139,8 +1180,8 @@ func TestCppDroppedTheMacroResult(t *testing.T) {
 // TestDeepNestingPredicate pins hasDeepNesting from both sides. A class
 // defined by what was written is only as good as its predicate: too narrow
 // and the nightly reports a recorded divergence as a new one, which is how
-// this class was widened twice; too wide and it excuses a real bug that
-// happens to arrive on a line with operators on it.
+// this class was widened three times; too wide and it excuses a real bug
+// that happens to arrive on a line with operators on it.
 //
 // The deep cases are the shapes measured against the oracle, each at the
 // count where C++ gives up. The ordinary ones are what config looks like.
@@ -1166,6 +1207,22 @@ func TestDeepNestingPredicate(t *testing.T) {
 		"behind an unterminated quote": "0=A\"$EVAL(" + strings.Repeat("!", 401) + "'')",
 		"behind an unterminated apostrophe": "0=it's $EVAL(" +
 			strings.Repeat("!", 401) + "true)",
+		// A quote that DOES close, at the far end of the line, so reading
+		// it as a literal swallows the chain written between the two.
+		// It opens straight after an operand, where no literal can.
+		"behind a quote that closes at the far end": "0=a'00$EVAL(" +
+			strings.Repeat("!", 401) + "'')",
+		"behind a double quote that closes at the far end": "0=a\"00$EVAL(" +
+			strings.Repeat("!", 401) + "true)\"",
+		// The same, with the quote where a literal could legitimately
+		// open. Only the `$EVAL` spanned tells this one apart.
+		"behind a quote that opens the value and closes at the far end": "0='$EVAL(" +
+			strings.Repeat("!", 401) + "'')",
+		// A quote in operand position, where a literal CAN open, that
+		// never closes. Config does not read quotes at all, so the
+		// `$EVAL` is expanded and the chain reaches the cap all the same.
+		"behind an unterminated quote in operand position": "A=\"$EVAL(" +
+			strings.Repeat("!", 401) + "true)",
 	}
 	for name, in := range deep {
 		if !hasDeepNesting(in) {
@@ -1186,6 +1243,11 @@ func TestDeepNestingPredicate(t *testing.T) {
 		// in a chain past the threshold so that skipping the literal is
 		// what decides the case
 		"an operator chain inside a string": "Y = \"" +
+			strings.Repeat("+a", 400) + "\"\n",
+		// The same chain inside a literal that opens after an operator
+		// rather than at the start of the value, which is still operand
+		// position and so still a literal.
+		"an operator chain inside a string mid-expression": "Y = 1 + \"" +
 			strings.Repeat("+a", 400) + "\"\n",
 		"a run of macro references": strings.Repeat("$(A)", 200) + "\n",
 	}
