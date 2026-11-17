@@ -52,43 +52,43 @@ func renderConsentFor(t *testing.T, h *Handler, groups, requested []string) stri
 // left the whole admin/superuser tier unreachable rather than merely
 // unused.
 //
-// There are two ways to reach one, and a scope needs only one of them.
-// An OAuth2 client asks for what the server advertises, so an OAuth2
-// scope must be in oauth2AdvertisedScopes. An API key is minted
-// directly by an administrator and never goes through an authorization
-// flow at all, so an API-key scope must be in validScopes instead. The
-// ap:* entitlements are mintable today and not advertised; whether
-// they should also become OAuth2 scopes is open (see
-// design_notes/ENTITLEMENT_VOCABULARY.md), and this test is written so
-// that answering it either way does not require editing the test.
+// There are three ways to reach one, and a scope needs only one of
+// them. An OAuth2 client asks for what the server advertises, so an
+// OAuth2 scope must be in oauth2AdvertisedScopes -- unless it is a
+// superseded spelling, which a client already registered for it goes on
+// asking for by name. An API key is minted directly by an administrator
+// and never goes through an authorization flow at all, so an API-key
+// scope must be in validScopes instead.
 func TestPrivilegedScopesAreReachable(t *testing.T) {
-	advertised := make(map[string]bool, len(oauth2AdvertisedScopes))
-	for _, scope := range oauth2AdvertisedScopes {
-		advertised[scope] = true
-	}
 	for scope := range privilegedScopes {
 		_, mintable := validScopes[scope]
-		if !advertised[scope] && !mintable {
-			t.Errorf("%s is privileged but neither advertised nor mintable, "+
+		if !slices.Contains(oauth2AdvertisedScopes, scope) &&
+			!slices.Contains(oauth2SupersededScopes, scope) && !mintable {
+			t.Errorf("%s is privileged but neither advertised, superseded nor mintable, "+
 				"so nothing can ever request it", scope)
 		}
 	}
 }
 
 // And the OAuth2 half of that keeps its stronger form: a privileged
-// scope an OAuth2 grant can carry must stay advertised, or every client
-// holding it fails to refresh.
-func TestOAuth2PrivilegedScopesStayAdvertised(t *testing.T) {
-	advertised := make(map[string]bool, len(oauth2AdvertisedScopes))
-	for _, scope := range oauth2AdvertisedScopes {
-		advertised[scope] = true
-	}
+// scope an OAuth2 grant can carry must stay *requestable*, or every
+// client holding it fails to refresh. Advertised or superseded; what it
+// must not be is neither.
+func TestOAuth2PrivilegedScopesStayRequestable(t *testing.T) {
 	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
 		if !privilegedScopes[scope] {
 			t.Errorf("%s is no longer marked privileged", scope)
 		}
-		if !advertised[scope] {
-			t.Errorf("%s is not advertised, so no client can request it", scope)
+		if !slices.Contains(cimdClientScopes(""), scope) {
+			t.Errorf("%s is not requestable, so a grant carrying it cannot refresh", scope)
+		}
+	}
+	// The superseded pair is requestable and nothing more: advertised,
+	// it would be requested by every client and shown beside the name
+	// that replaced it.
+	for _, scope := range oauth2SupersededScopes {
+		if slices.Contains(oauth2AdvertisedScopes, scope) {
+			t.Errorf("the superseded %s is advertised again", scope)
 		}
 	}
 }
@@ -104,9 +104,9 @@ func TestPrivilegedScopesAreOfferedUnchecked(t *testing.T) {
 	h := consentTestHandler(t, "condor-admins", "condor-supers")
 	page := renderConsentFor(t, h,
 		[]string{"condor-admins", "condor-supers"},
-		[]string{"openid", "mcp:read", "mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite})
+		[]string{"openid", "mcp:read", scopeAnyUserRead, scopeAnyUserWrite})
 
-	for _, scope := range []string{"mcp:admin", "mcp:superuser", scopeAnyUserRead, scopeAnyUserWrite} {
+	for _, scope := range []string{scopeAnyUserRead, scopeAnyUserWrite} {
 		i := strings.Index(page, `value="`+scope+`"`)
 		if i < 0 {
 			t.Fatalf("%s was not offered to a member of its group:\n%s", scope, page)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -871,16 +872,14 @@ var signInScopes = map[string]bool{
 }
 
 var privilegedScopes = map[string]bool{
-	"mcp:admin":     true,
-	"mcp:superuser": true,
-	// The same two powers under the names that say what they grant.
-	// Listed here before they can be requested through OAuth2 at all --
-	// today they are mintable only on an API key -- because the cost of
-	// listing a scope that never reaches a consent page is nothing, and
-	// the cost of the reverse is a client granted power over everyone's
-	// jobs by a box that was ticked for it.
 	scopeAnyUserRead:  true,
 	scopeAnyUserWrite: true,
+	// The same two powers under their older spellings. Unadvertised and
+	// never shown (supersededScopes), but a client can still ask for one
+	// and a grant can still carry it, so leaving them out here would be
+	// a cross-user power rendered as an ordinary pre-ticked checkbox.
+	"mcp:admin":     true,
+	"mcp:superuser": true,
 }
 
 func getScopeDescription(scope string) string {
@@ -1609,11 +1608,13 @@ var oauth2AdvertisedScopes = []string{
 	"openid", "profile", "email",
 	"offline_access",
 	"mcp:read", "mcp:write",
-	// Requestable by any client, granted only to members of the operator's
-	// admin/superuser groups (getScopesForGroups). Unadvertised they were
-	// unreachable: a client asks for what the server advertises, so nothing
-	// ever requested them and the two-tier privilege model below them was
-	// dead in practice.
+	// The two cross-user powers, each named for what it grants.
+	// Advertised so an OAuth2 client can request them at all -- a client
+	// asks only for what the server advertises -- and granted only to
+	// members of the operator's admin/superuser groups
+	// (getScopesForGroups). Unadvertised they would be unreachable:
+	// nothing would ever request them and the two-tier privilege model
+	// below them would be dead in practice.
 	//
 	// Advertising them is what makes a privilege separable from an
 	// identity. Before this, an admin's every token carried their admin
@@ -1621,13 +1622,10 @@ var oauth2AdvertisedScopes = []string{
 	// carries them only if this authorization granted them, so an agent
 	// can be given an access point to look after without being given its
 	// owner's ability to remove anybody's jobs.
-	"mcp:admin", "mcp:superuser",
-	// The same two powers named for what they grant. Advertised so an
-	// OAuth2 client can request them at all -- a client asks only for
-	// what the server advertises -- and granted on exactly the group
-	// policy their older spellings answer to, so advertising them adds
-	// a name rather than a privilege. The consent page renders them
-	// unchecked, as it does any privileged scope.
+	//
+	// Their older spellings, mcp:admin and mcp:superuser, are absent on
+	// purpose -- see supersededScopes. Advertising both put the same
+	// power on the consent page twice.
 	scopeAnyUserRead, scopeAnyUserWrite,
 	// READ and WRITE only. The ADVERTISE_* levels were advertised as
 	// scopes and no tool checked them. advertise_to_collector sends the
@@ -1684,6 +1682,69 @@ func (h *Handler) advertisedScopes() []string {
 // once no live grant can carry it.
 var oauth2DeprecatedScopes = []string{
 	"condor:/ADVERTISE_STARTD", "condor:/ADVERTISE_SCHEDD", "condor:/ADVERTISE_MASTER",
+}
+
+// supersededScopes maps a scope's older spelling to the name it is
+// offered under now. The two spellings of a power are the same power:
+// they answer to the same group policy (getScopesForGroups) and every
+// place that checks a token honours both, so this renames rather than
+// deprecates.
+//
+// A superseded name stays requestable -- an existing grant must not
+// fail to refresh, and a client that registered under the old name must
+// not lose a power to a rename it cannot see -- but it is neither
+// advertised nor shown. The consent page offers one checkbox per power,
+// under the newer name, and whatever older spellings the client asked
+// for ride along with it (narrowConsentScopes). That is the whole of
+// what "functional but invisible" means here: nothing a token can carry
+// changed, only what a reader is asked to weigh.
+//
+// Contrast oauth2DeprecatedScopes, which are requestable and grant
+// nothing. These grant exactly what they always did.
+var supersededScopes = map[string]string{
+	"mcp:admin":     scopeAnyUserRead,
+	"mcp:superuser": scopeAnyUserWrite,
+}
+
+// oauth2SupersededScopes is supersededScopes' keys, for the lists that
+// decide what a client may ask for. Derived rather than written out so
+// the two cannot drift: a name added to the map above is requestable
+// without a second edit.
+var oauth2SupersededScopes = slices.Sorted(maps.Keys(supersededScopes))
+
+// consentScopeLabel is the name a scope is offered under on the consent
+// page, which is not always the value its checkbox submits.
+func consentScopeLabel(scope string) string {
+	if canonical, ok := supersededScopes[scope]; ok {
+		return canonical
+	}
+	return scope
+}
+
+// withoutSupersededDuplicates drops a superseded spelling when the name
+// that replaced it was requested too. Without it a client that asks for
+// both -- which is any client whose registration spans the rename --
+// renders two checkboxes carrying the same label, the same description
+// and the same power.
+//
+// A spelling requested on its own is kept, and rendered under the newer
+// name. Dropping it instead would take a power away from the one client
+// that cannot ask for it by any other name: a registered client's scope
+// list is fixed at registration, so a client registered before
+// anyuser:read existed can never request it.
+func withoutSupersededDuplicates(requested []string) []string {
+	present := make(map[string]bool, len(requested))
+	for _, scope := range requested {
+		present[scope] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, scope := range requested {
+		if canonical, ok := supersededScopes[scope]; ok && present[canonical] {
+			continue
+		}
+		out = append(out, scope)
+	}
+	return out
 }
 
 // handleOAuth2Metadata handles OAuth2 authorization server metadata discovery
@@ -2410,6 +2471,7 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
 	p.RequestedScopes = h.grantableScopes(userGroups, p.RequestedScopes)
 	p.RequestedScopes = h.scopesAllowedByScheddACL(ctx, p.Username, p.RequestedScopes)
 	p.RequestedScopes = withoutDeprecatedScopes(p.RequestedScopes)
+	p.RequestedScopes = withoutSupersededDuplicates(p.RequestedScopes)
 
 	// Build scopes list HTML
 	var scopesHTML strings.Builder
@@ -2445,6 +2507,10 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
 		}
 		desc := html.EscapeString(getScopeDescription(scope))
 		escScope := html.EscapeString(scope)
+		// What the box is called is not always what it submits: a
+		// superseded spelling is offered under the name that replaced
+		// it, so a reader is never shown two names for one power.
+		escLabel := html.EscapeString(consentScopeLabel(scope))
 		// A privileged scope starts UNCHECKED, which is the whole point.
 		// Rendering it checked like the others would mean an admin grants
 		// every client power over everyone's jobs unless they remember to
@@ -2456,10 +2522,10 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
 				"                <li class=\"scope-privileged\">\n"+
 					"                    <label>\n"+
 					"                        <input type=\"checkbox\" name=\"scope\" value=\"%s\">\n"+
-					"                        <strong>%s</strong> <span class=\"privileged-tag\">affects other users</span>\n"+
+					"                        <span class=\"scope-head\"><strong>%s</strong><span class=\"privileged-tag\">affects other users</span></span>\n"+
 					"                        <p>%s</p>\n"+
 					"                    </label>\n"+
-					"                </li>\n", escScope, escScope, desc)
+					"                </li>\n", escScope, escLabel, desc)
 			continue
 		}
 		fmt.Fprintf(&scopesHTML,
@@ -2469,7 +2535,7 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
 				"                        <strong>%s</strong>\n"+
 				"                        <p>%s</p>\n"+
 				"                    </label>\n"+
-				"                </li>\n", escScope, escScope, desc)
+				"                </li>\n", escScope, escLabel, desc)
 	}
 	scopesHTML.WriteString("            </ul>")
 
@@ -2665,9 +2731,21 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
             height: 18px;
             cursor: pointer;
         }
-        .scopes-list li.scope-privileged strong {
+        /* The name and its tag share one grid cell, as a flex line of
+           their own. The label is display:contents, so every element
+           inside it is a grid item: the tag had no placement of its own
+           and auto-flowed into the 18px checkbox column, where it wrapped
+           to three lines across the description underneath it. */
+        .scopes-list li.scope-privileged .scope-head {
             grid-row: 1;
             grid-column: 2;
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 2px 6px;
+        }
+        .scopes-list li.scope-privileged .scope-head strong {
+            margin-bottom: 0;
         }
         .scopes-list li.scope-privileged p {
             grid-row: 2;
@@ -2679,7 +2757,6 @@ func (h *Handler) renderConsentPage(ctx context.Context, w http.ResponseWriter, 
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-left: 6px;
         }
         .privileged-warning {
             border: 1px solid #f0b429;
@@ -3041,6 +3118,17 @@ func narrowConsentScopes(requestedScopes []string, form url.Values) []string {
 	}
 	for _, s := range form["scope"] {
 		if requestedSet[s] {
+			acceptedSet[s] = true
+		}
+	}
+	// A superseded spelling has no box of its own: the page offers its
+	// power under the name that replaced it (withoutSupersededDuplicates).
+	// Accepting that name accepts every spelling of it the client asked
+	// for, so a client still holding the old name keeps the power the
+	// user just granted it. Nothing enters here that was not requested,
+	// and a box left unticked still accepts neither spelling.
+	for _, s := range requestedScopes {
+		if canonical, ok := supersededScopes[s]; ok && acceptedSet[canonical] {
 			acceptedSet[s] = true
 		}
 	}

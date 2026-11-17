@@ -429,19 +429,23 @@ func (r *cimdResolver) fetch(ctx context.Context, clientID string) (*fosite.Defa
 }
 
 // cimdClientScopes is the scope set a CIMD client may request: the advertised
-// set plus the deprecated ones its existing grants may still carry, narrowed
-// to what the document declares when it declares any (least privilege when
-// the client is specific, parity with a DCR client otherwise). The user still
-// consents and the schedd's ALLOW_<LEVEL> still gates, so this bounds what can
-// be *asked for*, not what is granted.
+// set, plus the deprecated and superseded ones its existing grants may still
+// carry, narrowed to what the document declares when it declares any (least
+// privilege when the client is specific, parity with a DCR client otherwise).
+// The user still consents and the schedd's ALLOW_<LEVEL> still gates, so this
+// bounds what can be *asked for*, not what is granted.
 //
 // A DCR client stores its scopes at registration and keeps them; a CIMD client
 // has no stored list, so this function is the whole of its scope record and is
 // consulted afresh on every authorize and every refresh.
 func cimdClientScopes(declared string) []string {
-	requestable := make([]string, 0, len(oauth2AdvertisedScopes)+len(oauth2DeprecatedScopes))
+	requestable := make([]string, 0,
+		len(oauth2AdvertisedScopes)+len(oauth2DeprecatedScopes)+len(oauth2SupersededScopes))
 	requestable = append(requestable, oauth2AdvertisedScopes...)
 	requestable = append(requestable, oauth2DeprecatedScopes...)
+	// Unadvertised but still granted, so a grant carrying one refreshes
+	// and a document that names one is taken at its word.
+	requestable = append(requestable, oauth2SupersededScopes...)
 	if strings.TrimSpace(declared) == "" {
 		return requestable
 	}

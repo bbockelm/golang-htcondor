@@ -11,6 +11,7 @@ line between them is drawn here rather than left to be inferred:
 | `anyuser:read` and `anyuser:write` exist, mintable on an API key and grantable through OAuth2 | every rename below |
 | Both are advertised, consent-unchecked, and gated on the groups their older spellings answer to | the `*_GROUPS` / `*_USERS` scheme |
 | Both are honoured on REST and MCP alike, and named by `whoami` | |
+| `mcp:admin` and `mcp:superuser` are requestable but no longer advertised or shown; each power is offered once, under its `anyuser:*` name | |
 | Entitlements are granted at mint and re-verified on use (service keys) | splitting `HTTP_API_WEBUI_ADMIN_GROUP` |
 | `MCP_ADMIN_USERS` keeps its behaviour | deprecating it in earnest |
 | | both MCP scope-challenge fixes |
@@ -57,8 +58,8 @@ the rest. "Carried by" is which credential kinds can hold it.
 | `offline_access` | OAuth2 | A refresh token. Requested from the upstream provider by default unless `HTTP_API_UPSTREAM_REFRESH` is `off`. | unchanged |
 | `mcp:read` | OAuth2 | Read through `/mcp`. | **[OPEN]**, below |
 | `mcp:write` | OAuth2 | Submit and manage through `/mcp`. | **[OPEN]**, below |
-| `mcp:admin` | OAuth2 | Read **every** user's jobs on this access point, on REST and MCP alike. | → `anyuser:read` |
-| `mcp:superuser` | OAuth2 | Act on **every** user's jobs on this access point. | → `anyuser:write` |
+| `mcp:admin` | OAuth2 | Read **every** user's jobs on this access point, on REST and MCP alike. Superseded by `anyuser:read`: requestable and honoured, neither advertised nor shown. | settled |
+| `mcp:superuser` | OAuth2 | Act on **every** user's jobs on this access point. Superseded by `anyuser:write` on the same terms. | settled |
 | `condor:/READ` | OAuth2, API key | HTCondor READ, carried into the minted IDTOKEN as an authorization limit. | unchanged |
 | `condor:/WRITE` | OAuth2, API key | HTCondor WRITE, same mechanism. Not a superset of READ. | unchanged |
 | `condor:/ADVERTISE_STARTD`, `_SCHEDD`, `_MASTER` | OAuth2 | Nothing. Deprecated, kept only so existing grants can refresh; dropped from a grant at its next authorization. | unchanged |
@@ -313,6 +314,11 @@ two-tier privilege model was dead in practice. That reasoning was right
 under 2025-06-18, which offered no other way to reach them. 2025-11-25
 offers the step-up challenge, which is the mechanism that was missing.
 
+**Partly done.** `mcp:admin` and `mcp:superuser` have left the
+advertisement, so no client asks for them any more, and both stay
+requestable. `anyuser:read` and `anyuser:write` are still advertised, so
+the maximal-set objection stands for the pair that replaced them.
+
 **Proposal.** Advertise the minimal set — `openid`, `profile`, `email`,
 `offline_access`, `mcp:read`, `condor:/READ` — and name the rest in the
 challenge when a request actually needs them. Keep every scope
@@ -361,8 +367,13 @@ Old config names stay accepted as aliases with a startup line naming the
 replacement; stored `granted_scopes` rows carrying `mcp:admin` or
 `mcp:superuser` keep resolving to the corresponding power, because a
 grant must not lose its power to an upgrade and a refresh must not
-silently narrow it; the old scope strings stay advertised so existing
-clients requesting them keep working. Each alias is pinned with a test,
+silently narrow it; the old scope strings stay requestable, so a client
+asking for one is not refused. What they no longer are is advertised or
+shown. The consent page offers each power once, under its `anyuser:*`
+name, and accepting that box accepts whichever older spellings the
+client also asked for (`supersededScopes`, `narrowConsentScopes`) — so a
+client that knows the power only by its old name keeps it, and a reader
+is never shown two names for one power. Each alias is pinned with a test,
 not left to inspection.
 
 Note the trap recorded on `oauth2AdvertisedScopes`: a client asks for
@@ -381,7 +392,7 @@ with one deliberate exception.
 | An API key minted before this | Untouched. It carries no `anyuser:*` scope — none existed — so the entitlement path is skipped entirely and costs it not even a lookup. |
 | An OAuth2 grant carrying `mcp:admin` / `mcp:superuser` | Still honoured, on REST and MCP alike. The `anyuser:*` scopes were added beside them, not in place of them. |
 | A refresh of such a grant | Unchanged. Re-authorization re-runs the group policy it always did. |
-| A CIMD client | Unchanged. Its requestable set is recomputed from the advertised list, which did not change. |
+| A CIMD client | Unchanged in what it may ask for: its requestable set is recomputed per request from the advertised list **plus** the superseded spellings, which is why dropping two names from the advertisement refuses no grant that carries them. |
 | `MCP_ADMIN_USERS` | Unchanged, deprecated. See above. |
 | A browser session | Unchanged. |
 | An upstream SSO login | **Changes:** the next authorization also asks for `offline_access`. A provider that refuses it has that refusal absorbed and the sign-in retried without it, so a login that worked keeps working. This is the one deliberate exception. |

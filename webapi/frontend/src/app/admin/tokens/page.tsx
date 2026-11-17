@@ -150,7 +150,16 @@ export default function AdminTokensPage() {
 // privilegedScopes act on other people's jobs rather than the holder's
 // own. Marked so an operator scanning this page can see at a glance which
 // agent is carrying one, which is the reason the page is worth reading.
-const privilegedScopes = new Set(["mcp:admin", "mcp:superuser"]);
+//
+// Both spellings of both powers. A grant minted before the rename
+// carries the older one, and a cross-user power left unmarked here is
+// exactly the agent an operator is scanning for.
+const privilegedScopes = new Set([
+  "anyuser:read",
+  "anyuser:write",
+  "mcp:admin",
+  "mcp:superuser",
+]);
 
 function ScopeChips({
   token,

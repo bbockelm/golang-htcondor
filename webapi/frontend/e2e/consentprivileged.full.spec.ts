@@ -18,6 +18,11 @@ import { serverLog } from './fixtures/serverlog';
 //     policy drops it either way, so a checkbox there would read as a
 //     privilege they hold and do not.
 //
+//   - a superseded spelling is never shown, and ticking the name that
+//     replaced it accepts both. A client whose registration spans the
+//     rename asks for both spellings of one power; the page offers it
+//     once, and the grant still carries whatever the client knows it as.
+//
 // Demo mode puts both scopes on the "admin" group, so the seeded admin
 // is eligible and the seeded user is not.
 
@@ -25,7 +30,19 @@ const log = serverLog();
 const adminPw = adminPassword(log);
 const userPw = userPassword(log);
 
-const REQUESTED = ['openid', 'offline_access', 'mcp:read', 'mcp:admin', 'mcp:superuser'];
+// Both spellings of both powers, which is what a client registered
+// across the rename asks for.
+const REQUESTED = [
+  'openid',
+  'offline_access',
+  'mcp:read',
+  'mcp:admin',
+  'mcp:superuser',
+  'anyuser:read',
+  'anyuser:write',
+];
+const SUPERSEDED = ['mcp:admin', 'mcp:superuser'];
+const PRIVILEGED = ['anyuser:read', 'anyuser:write'];
 const REDIRECT_URI = 'http://127.0.0.1:39521/callback';
 
 type Client = { clientId: string; clientSecret: string };
@@ -95,10 +112,18 @@ test('an eligible admin is offered the privileged scopes unchecked, and approvin
   await loginAs(page, 'admin', adminPw);
   await openConsent(page, baseURL!, client);
 
-  for (const scope of ['mcp:admin', 'mcp:superuser']) {
+  for (const scope of PRIVILEGED) {
     const box = page.locator(`input[type="checkbox"][name="scope"][value="${scope}"]`);
     await expect(box, `${scope} was not offered to a member of its group`).toHaveCount(1);
     await expect(box, `${scope} is pre-checked; granting it would be the default`).not.toBeChecked();
+  }
+  // The superseded spellings are the same two powers, and the page shows
+  // each power once.
+  for (const scope of SUPERSEDED) {
+    await expect(
+      page.locator(`input[type="checkbox"][name="scope"][value="${scope}"]`),
+      `${scope} was offered beside the name that replaced it`,
+    ).toHaveCount(0);
   }
   // An ordinary scope keeps the old behaviour.
   await expect(
@@ -111,23 +136,32 @@ test('an eligible admin is offered the privileged scopes unchecked, and approvin
   // Approving without touching them must not grant them. This is the
   // whole point: an omission grants nothing.
   const granted = await approveAndExchange(page, request, baseURL!, client);
-  expect(granted, 'approving without ticking granted mcp:admin').not.toContain('mcp:admin');
-  expect(granted, 'approving without ticking granted mcp:superuser').not.toContain('mcp:superuser');
+  for (const scope of [...PRIVILEGED, ...SUPERSEDED]) {
+    expect(granted, `approving without ticking granted ${scope}`).not.toContain(scope);
+  }
   expect(granted, 'approving dropped a scope that was ticked').toContain('mcp:read');
 });
 
-test('ticking a privileged scope grants it', async ({ page, request, baseURL }) => {
+test('ticking a privileged scope grants it, under both its names', async ({
+  page,
+  request,
+  baseURL,
+}) => {
   const client = await registerClient(request, baseURL!);
   await loginAs(page, 'admin', adminPw);
   await openConsent(page, baseURL!, client);
 
-  await page.locator('input[type="checkbox"][name="scope"][value="mcp:admin"]').check();
+  await page.locator('input[type="checkbox"][name="scope"][value="anyuser:read"]').check();
 
   const granted = await approveAndExchange(page, request, baseURL!, client);
-  expect(granted, 'ticking mcp:admin did not grant it').toContain('mcp:admin');
+  expect(granted, 'ticking anyuser:read did not grant it').toContain('anyuser:read');
+  // The superseded spelling rides along, so a client that knows the
+  // power only by its old name keeps what was just granted.
+  expect(granted, 'the superseded spelling was dropped from the grant').toContain('mcp:admin');
   expect(granted, 'ticking one privileged scope granted the other too').not.toContain(
-    'mcp:superuser',
+    'anyuser:write',
   );
+  expect(granted, 'the other power rode along under its old name').not.toContain('mcp:superuser');
 });
 
 test('a user outside the group is not offered them at all', async ({ page, request, baseURL }) => {
@@ -135,7 +169,7 @@ test('a user outside the group is not offered them at all', async ({ page, reque
   await loginAs(page, 'user', userPw);
   await openConsent(page, baseURL!, client);
 
-  for (const scope of ['mcp:admin', 'mcp:superuser']) {
+  for (const scope of [...PRIVILEGED, ...SUPERSEDED]) {
     await expect(
       page.locator(`input[type="checkbox"][name="scope"][value="${scope}"]`),
       `${scope} was offered to a user who cannot be granted it`,

@@ -90,7 +90,7 @@ EXAMPLES:
     htcondor-api token fetch https://localhost:8080 --scopes READ,WRITE,ADVERTISE
 
     # Request custom MCP scopes
-    htcondor-api token fetch https://localhost:8080 --scopes mcp:admin,condor:/ADMINISTRATOR
+    htcondor-api token fetch https://localhost:8080 --scopes anyuser:read,condor:/ADMINISTRATOR
 
 TOKEN STORAGE:
     Tokens are stored in ~/.condor/token_info.json and automatically refreshed

@@ -319,8 +319,8 @@ HTTP_API_POOL_QUERY_IDENTITY = restricted
 - **`admin`** requires that privilege for any pool query at all.
 
 The privilege is the same one that decides whether a caller may read
-other users' jobs — `HTTP_API_WEBUI_ADMIN_GROUP`, the `mcp:admin` scope,
-or `MCP_ADMIN_USERS`; see [Authorization
+other users' jobs — `HTTP_API_WEBUI_ADMIN_GROUP`, the `anyuser:read`
+scope, or `MCP_ADMIN_USERS`; see [Authorization
 groups](server-auth.md#authorization-groups). Someone who may already
 read everyone's jobs is not restricted here.
 
