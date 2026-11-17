@@ -20,7 +20,8 @@ import (
 func TestHostCertVerifiesFromTheAuthorityAlone(t *testing.T) {
 	host, ca := testSigner(t), testSigner(t)
 
-	signer, err := NewHostCertSigner(host, ca, nil, time.Now())
+	names := []string{"ap.example.edu", "an-alias.example.org"}
+	signer, err := NewHostCertSigner(host, ca, names, time.Now())
 	if err != nil {
 		t.Fatalf("issuing a host certificate: %v", err)
 	}
@@ -30,11 +31,44 @@ func TestHostCertVerifiesFromTheAuthorityAlone(t *testing.T) {
 			return string(auth.Marshal()) == string(ca.PublicKey().Marshal())
 		},
 	}
-	// Any name, because the certificate lists no principals.
-	for _, addr := range []string{"ap.example.edu:22", "an-alias.example.org:2222", "127.0.0.1:41234"} {
+	// Every name the certificate lists, on any port.
+	for _, addr := range []string{"ap.example.edu:22", "an-alias.example.org:2222"} {
 		if err := checker.CheckHostKey(addr, nil, signer.PublicKey()); err != nil {
 			t.Errorf("a client trusting the CA rejected the gateway at %s: %v", addr, err)
 		}
+	}
+	// And no other name. A host certificate listing no principals used
+	// to be good for every name; x/crypto v0.59.0 removed that wildcard
+	// and matches principals exactly, so a name the operator did not
+	// configure must now fail closed.
+	if err := checker.CheckHostKey("not-the-gateway.example.net:22", nil, signer.PublicKey()); err == nil {
+		t.Error("a name the certificate does not list was accepted")
+	}
+}
+
+// A gateway that cannot name itself must not get a certificate at all,
+// rather than one good for every host on the internet.
+func TestHostCertRequiresAPrincipal(t *testing.T) {
+	host, ca := testSigner(t), testSigner(t)
+
+	// x/crypto would refuse this too, with "ssh: certificate has no
+	// principals". The message is asserted because that is the whole
+	// reason this package checks first: the operator has to be told
+	// what to supply, not what a library two layers down objected to.
+	err := func() error {
+		_, err := NewHostCertSigner(host, ca, nil, time.Now())
+		return err
+	}()
+	if err == nil {
+		t.Error("a host certificate was issued with no principals")
+	} else if !strings.Contains(err.Error(), "needs at least one principal") {
+		t.Errorf("the error does not say what to supply: %v", err)
+	}
+	if _, err := NewHostCertSigner(host, ca, []string{""}, time.Now()); err == nil {
+		t.Error("a host certificate was issued with an empty principal")
+	}
+	if _, err := NewHostCertSigner(host, ca, []string{"  "}, time.Now()); err == nil {
+		t.Error("a host certificate was issued with a blank principal")
 	}
 }
 
@@ -55,7 +89,7 @@ func TestBareHostKeyIsNotAcceptedFromTheAuthority(t *testing.T) {
 
 func TestHostCertIsAHostCert(t *testing.T) {
 	host, ca := testSigner(t), testSigner(t)
-	signer, err := NewHostCertSigner(host, ca, nil, time.Now())
+	signer, err := NewHostCertSigner(host, ca, []string{"ap.example.edu"}, time.Now())
 	if err != nil {
 		t.Fatalf("issuing a host certificate: %v", err)
 	}

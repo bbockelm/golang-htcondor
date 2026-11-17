@@ -285,13 +285,22 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 	var hostCert ssh.Signer
 	if h.sshCASigner != nil {
 		// Principals are the operator's configured gateway names, and
-		// none when they configured none -- a certificate listing no
-		// principals is good for every name, which is what a server
-		// that does not know the names it is reached by has to say. It
-		// binds :2222 behind whatever the operator put in front of it,
-		// and a certificate naming the wrong name fails closed for
-		// everybody.
+		// there has to be at least one. A certificate listing none used
+		// to mean "every name", which is what a server that does not
+		// know the names it is reached by had to say; golang.org/x/crypto
+		// v0.59.0 removed that wildcard and will not sign such a
+		// certificate at all.
+		//
+		// Fatal rather than quietly dropping back to the bare host key,
+		// for the same reason an unresolvable gateway address above is
+		// fatal: the operator asked for a gateway, and a security
+		// feature that silently did not happen is worse to diagnose
+		// than a startup error naming the knob to set.
 		names := sshgateway.ParseHostNames(h.sshGatewayPublicHost)
+		if len(names) == 0 {
+			return fmt.Errorf("an SSH certificate authority is configured but HTTP_API_SSH_GATEWAY_HOST is not: " +
+				"set it to the name(s) clients ssh to, so the gateway's host certificate can name itself")
+		}
 		signer, err := sshgateway.NewHostCertSigner(
 			hostKey.Signer, h.sshCASigner, names, time.Now())
 		if err != nil {

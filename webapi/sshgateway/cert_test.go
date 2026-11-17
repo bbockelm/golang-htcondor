@@ -463,11 +463,29 @@ func TestUnknownCriticalOptionIsRefused(t *testing.T) {
 
 func TestEmptyPrincipalIsRefused(t *testing.T) {
 	f := newCertFixture(t)
-	tr := &fakeTransport{}
-	addr := certGateway(t, tr, f.ca.PublicKey())
 
-	f.cert.ValidPrincipals = []string{""}
-	if _, err := certDial(t, addr, "12345.0", ssh.PublicKeys(f.resignSigner(t))); err == nil {
-		t.Fatal("a certificate naming an empty principal logged in")
+	// Driven through CertAuth.Callback rather than over a real
+	// connection. x/crypto v0.59.0 refuses to sign a certificate whose
+	// principal is empty, so this input can no longer be minted and
+	// dialed the way the other tampering tests are. The guard it has to
+	// exercise is this gateway's own, and that guard runs before any
+	// signature is looked at, so an unsigned certificate reaches it
+	// exactly as a signed one would.
+	auth := &CertAuth{Authority: f.ca.PublicKey()}
+	cert := &ssh.Certificate{
+		Key:             f.userKey.PublicKey(),
+		CertType:        ssh.UserCert,
+		ValidPrincipals: []string{""},
+	}
+	if _, err := auth.Callback(nil, cert); err == nil {
+		t.Fatal("a certificate naming an empty principal was accepted")
+	}
+
+	// The neighbouring guard, for contrast: a principal that is present
+	// but not the one the gateway would act as is refused for naming
+	// the wrong thing, not for being blank.
+	cert.ValidPrincipals = []string{"someone", "else"}
+	if _, err := auth.Callback(nil, cert); err == nil {
+		t.Fatal("a certificate naming several principals was accepted")
 	}
 }

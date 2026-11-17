@@ -169,7 +169,7 @@ func TestPerSourceSlotsAreReleasedCompletely(t *testing.T) {
 // for a change that was supposed to remove a prompt.
 func TestBothHostKeyAlgorithmsAreOffered(t *testing.T) {
 	host, ca := testSigner(t), testSigner(t)
-	cert, err := NewHostCertSigner(host, ca, nil, time.Now())
+	cert, err := NewHostCertSigner(host, ca, []string{"ap.example.edu"}, time.Now())
 	if err != nil {
 		t.Fatalf("issuing a host certificate: %v", err)
 	}
