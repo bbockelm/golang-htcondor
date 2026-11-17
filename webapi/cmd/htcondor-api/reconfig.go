@@ -63,6 +63,8 @@ type reconfigTarget interface {
 	SetSiteAppPolicy(*config.Config)
 	SetMCPDisabledTools(string)
 	SetMCPReadOnly(string)
+	SetMCPConfirmSubmitOver(string)
+	SetMCPConfirmRemoveOver(string)
 	SetInteractiveJupyter(string)
 	SetInteractiveVSCode(string)
 	SetInteractiveTerminal(string)
@@ -113,6 +115,24 @@ var reconfigParams = []reconfigParam{
 		name: "HTTP_API_MCP_READ_ONLY",
 		apply: func(s reconfigTarget, v string) {
 			s.SetMCPReadOnly(v)
+		},
+	},
+
+	// The job counts above which the MCP submit and remove tools ask a
+	// person to confirm. Dynamic for the same reason as the setting
+	// above, and reachable the same way: an operator who has just seen
+	// an agent act at an unexpected scale wants the gate up for the
+	// sessions already connected, not at the next restart.
+	{
+		name: "HTTP_API_MCP_CONFIRM_SUBMIT_OVER",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPConfirmSubmitOver(v)
+		},
+	},
+	{
+		name: "HTTP_API_MCP_CONFIRM_REMOVE_OVER",
+		apply: func(s reconfigTarget, v string) {
+			s.SetMCPConfirmRemoveOver(v)
 		},
 	},
 

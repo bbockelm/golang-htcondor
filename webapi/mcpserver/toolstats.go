@@ -58,6 +58,13 @@ const (
 	toolstatsOutcomeOK      = "ok"
 	toolstatsOutcomeError   = "error"
 	toolstatsOutcomeRefused = "refused"
+	// toolstatsOutcomeAwaitingPerson is a call that stopped to ask the
+	// person running the client to confirm a bulk operation. It is not
+	// an outcome yet: the client answers and calls again, and that
+	// second call is counted as whatever it ends up being. Counted
+	// separately so an operator can see how often the gate fires
+	// without it inflating either the successes or the failures.
+	toolstatsOutcomeAwaitingPerson = "awaiting_person"
 	// toolstatsOutcomeUnknownTool is a call naming a tool this server
 	// does not have.
 	toolstatsOutcomeUnknownTool = "unknown_tool"

@@ -381,6 +381,12 @@ type Config struct {
 	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
 	// changes anything, whatever the caller's scopes say.
 	MCPReadOnly bool
+	// MCPConfirmSubmitOver (HTTP_API_MCP_CONFIRM_SUBMIT_OVER) and
+	// MCPConfirmRemoveOver (HTTP_API_MCP_CONFIRM_REMOVE_OVER) are the job
+	// counts above which the MCP submit and remove tools ask the person
+	// running the client to confirm. Zero is off, and is the default.
+	MCPConfirmSubmitOver int
+	MCPConfirmRemoveOver int
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false).
 	MCPDisableSecretRedaction bool
@@ -649,6 +655,8 @@ func NewServer(cfg Config) (*Server, error) {
 		MCPInstructions:             cfg.MCPInstructions,
 		MCPDisabledTools:            cfg.MCPDisabledTools,
 		MCPReadOnly:                 cfg.MCPReadOnly,
+		MCPConfirmSubmitOver:        cfg.MCPConfirmSubmitOver,
+		MCPConfirmRemoveOver:        cfg.MCPConfirmRemoveOver,
 		MCPDisableSecretRedaction:   cfg.MCPDisableSecretRedaction,
 		MCPRedactDisabledRules:      cfg.MCPRedactDisabledRules,
 		MCPSkillsDir:                cfg.MCPSkillsDir,

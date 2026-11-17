@@ -1225,6 +1225,23 @@ func (s *Server) handleCallTool(ctx context.Context, params json.RawMessage) (in
 // finishToolCall brings a tool's result up to its published contract, and
 // records and logs the outcome.
 func (s *Server) finishToolCall(ctx context.Context, name, traceID string, started time.Time, result interface{}, err error) (interface{}, error) {
+	// A call waiting on a person is not a call that finished: it has no
+	// content to bring up to a contract or to mask, and recording it as
+	// a success would tell an operator the work was done. Returned
+	// untouched, counted as its own outcome, and logged as what it is.
+	// See confirm.go.
+	if ask, ok := result.(*confirmationRequired); ok && err == nil {
+		s.recordToolCall(ctx, name, toolstatsOutcomeAwaitingPerson, time.Since(started))
+		s.logger.Info(logging.DestinationMCP, "MCP tool call is waiting on a person's confirmation",
+			"tool", name,
+			"trace_id", traceID,
+			"session_id", SessionIDFromContext(ctx),
+			"actor", htcondor.GetAuthenticatedUserFromContext(ctx),
+			"jobs", ask.Count,
+			"kind", string(ask.Kind))
+		return result, nil
+	}
+
 	// Bring the result up to the contract its published outputSchema
 	// states, before either transport marshals it. See
 	// structured_contract.go: a client rejects the whole result when a
@@ -1299,6 +1316,22 @@ func (s *Server) toolSubmitJob(ctx context.Context, args map[string]interface{})
 	insp := submitlint.Inspect(submitFile)
 	if insp.Fatal != nil {
 		return nil, insp.Fatal
+	}
+
+	// Over a site's threshold, ask the person running the client before
+	// submitting anything. The count is the one the submit file asks
+	// for, which the lint above already resolved, so a `queue` over a
+	// list or a file is counted as the jobs it really is.
+	//
+	// Before submitRemote and not after, obviously, but also before
+	// site policy is applied: what is being approved is the size of the
+	// request, and policy does not change that. See confirm.go -- on
+	// the second pass of the round trip this function runs again from
+	// the top, which is why the gate sits here and not in a wrapper.
+	if ask, err := s.confirmBulk(ctx, confirmSubmit, insp.QueueCount, ""); err != nil {
+		return nil, err
+	} else if ask != nil {
+		return ask, nil
 	}
 
 	// Site policy applies to the agent surface too: a requirement an
@@ -1919,6 +1952,26 @@ func (s *Server) toolRemoveJobs(ctx context.Context, args map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
+	// Over a site's threshold, ask the person running the client first.
+	//
+	// The count has to be taken before the removal, which means a query
+	// the ungated path does not make: RemoveJobs reports what it did,
+	// and by then it has done it. The number shown is therefore what
+	// matched a moment ago, and the gate rechecks it on the way back --
+	// a set that grew past what was approved is asked about again. See
+	// confirm.go.
+	if threshold := s.confirmThreshold(confirmRemove); threshold > 0 {
+		matched, err := s.countMatching(ctx, constraint)
+		if err != nil {
+			return nil, fmt.Errorf("counting the jobs this would remove: %w", err)
+		}
+		if ask, err := s.confirmBulk(ctx, confirmRemove, matched, llmConstraint); err != nil {
+			return nil, err
+		} else if ask != nil {
+			return ask, nil
+		}
+	}
+
 	results, err := s.scheddFor(ctx).RemoveJobs(ctx, constraint, reason)
 	if errors.Is(err, htcondor.ErrNoJobsMatched) {
 		return nil, fmt.Errorf("no jobs matched constraint '%s'", llmConstraint)

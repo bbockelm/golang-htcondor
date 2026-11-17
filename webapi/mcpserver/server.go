@@ -79,6 +79,11 @@ type Server struct {
 	// the caller's scopes say. Atomic for the same reason as the matcher
 	// above. See read_only.go.
 	readOnly atomic.Bool
+	// confirmSubmitOver / confirmRemoveOver are the job counts above which
+	// submit_job and remove_jobs stop and ask the person running the
+	// client to confirm. Zero -- the default -- is off. See confirm.go.
+	confirmSubmitOver atomic.Int64
+	confirmRemoveOver atomic.Int64
 	// interactiveSessionsOff is set where this access point does not
 	// offer interactive sessions at all -- the access point's setting
 	// rather than an MCP one, since the web console's Terminal is the
@@ -365,6 +370,18 @@ type Config struct {
 	// this binds every caller, including the unscoped ones. See
 	// read_only.go.
 	ReadOnly bool
+	// ConfirmSubmitOver (HTTP_API_MCP_CONFIRM_SUBMIT_OVER) and
+	// ConfirmRemoveOver (HTTP_API_MCP_CONFIRM_REMOVE_OVER) are job counts
+	// above which submit_job and remove_jobs ask the person running the
+	// client to confirm before acting.
+	//
+	// Zero is off, which is both the zero value and the default: the
+	// asking depends on client elicitation support, which is poor enough
+	// that a site should turn this on only after testing it with the
+	// clients its users run. A call over the threshold that cannot be
+	// asked is refused, never waved through. See confirm.go.
+	ConfirmSubmitOver int
+	ConfirmRemoveOver int
 	// SSHToJobNotOffered withholds every tool that reaches into a
 	// running job -- exec_in_job and the two session tools that enter
 	// the sandbox -- because this access point allows nothing to
@@ -673,6 +690,7 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	s.SetDisabledTools(cfg.DisabledTools)
 	s.SetReadOnly(cfg.ReadOnly)
+	s.SetConfirmThresholds(cfg.ConfirmSubmitOver, cfg.ConfirmRemoveOver)
 	s.SetInteractiveSessionsOffered(!cfg.InteractiveSessionsNotOffered)
 	s.SetSSHToJobOffered(!cfg.SSHToJobNotOffered)
 	s.SetSecretRedaction(!cfg.DisableSecretRedaction, cfg.RedactDisabledRules)

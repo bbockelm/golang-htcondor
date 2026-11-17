@@ -434,6 +434,13 @@ type Handler struct {
 	// written on a reconfigure and read only while applying it, which
 	// is why they are plain fields and this is not.
 	mcpReadOnly atomic.Bool
+	// mcpConfirmSubmitOver / mcpConfirmRemoveOver are the job counts
+	// above which the MCP submit and remove tools ask the person running
+	// the client to confirm. Zero is off, which is the default. Held here
+	// as well as in the tool server so a reconfigure and a rebuild of the
+	// MCP config agree. See mcpserver/confirm.go.
+	mcpConfirmSubmitOver atomic.Int64
+	mcpConfirmRemoveOver atomic.Int64
 	// HTTP_API_MCP_REDACT_SECRETS / _DISABLED_RULES: credential masking
 	// on tool results. Both are kept because the two settings are
 	// applied together and a reconfigure delivers one at a time.
@@ -1200,6 +1207,12 @@ type HandlerConfig struct {
 	// MCPReadOnly (HTTP_API_MCP_READ_ONLY) serves MCP with no tool that
 	// changes anything, for every caller regardless of scope.
 	MCPReadOnly bool
+	// MCPConfirmSubmitOver (HTTP_API_MCP_CONFIRM_SUBMIT_OVER) and
+	// MCPConfirmRemoveOver (HTTP_API_MCP_CONFIRM_REMOVE_OVER) are the job
+	// counts above which the MCP submit and remove tools ask the person
+	// running the client to confirm. Zero is off, and is the default.
+	MCPConfirmSubmitOver int
+	MCPConfirmRemoveOver int
 	// MCPDisableSecretRedaction turns off credential masking on MCP tool
 	// results (HTTP_API_MCP_REDACT_SECRETS = false). Negative so that the
 	// zero value is the protective one; see mcpserver.Config.
@@ -2348,6 +2361,8 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		h.mcpInstructions = cfg.MCPInstructions
 		h.mcpDisabledTools = cfg.MCPDisabledTools
 		h.mcpReadOnly.Store(cfg.MCPReadOnly)
+		h.mcpConfirmSubmitOver.Store(int64(cfg.MCPConfirmSubmitOver))
+		h.mcpConfirmRemoveOver.Store(int64(cfg.MCPConfirmRemoveOver))
 		h.mcpDisableSecretRedaction = cfg.MCPDisableSecretRedaction
 		h.mcpRedactDisabledRules = cfg.MCPRedactDisabledRules
 		h.mcpSkillsDir = cfg.MCPSkillsDir
@@ -2607,13 +2622,15 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		// only offers them when a credd is present.
 		CreddProvider: h.getCredd,
 		// Multi-AP mode: the credd of the AP a call was routed to.
-		CreddFor:       mcpCreddFor,
-		Collector:      h.collector,
-		HTCondorConfig: h.htcondorConfig,
-		AdminUsers:     h.mcpAdminUsers,
-		Instructions:   h.mcpInstructions,
-		DisabledTools:  h.mcpDisabledTools,
-		ReadOnly:       h.mcpReadOnly.Load(),
+		CreddFor:          mcpCreddFor,
+		Collector:         h.collector,
+		HTCondorConfig:    h.htcondorConfig,
+		AdminUsers:        h.mcpAdminUsers,
+		Instructions:      h.mcpInstructions,
+		DisabledTools:     h.mcpDisabledTools,
+		ReadOnly:          h.mcpReadOnly.Load(),
+		ConfirmSubmitOver: int(h.mcpConfirmSubmitOver.Load()),
+		ConfirmRemoveOver: int(h.mcpConfirmRemoveOver.Load()),
 		// The access point's own settings, not MCP ones: the MCP session
 		// tools and the console's Terminal are one capability, and what
 		// may reach into a running job is the site's decision however

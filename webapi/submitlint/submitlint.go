@@ -47,6 +47,15 @@ type Inspection struct {
 	// Warnings are non-fatal diagnostics surfaced in the submit_job
 	// response.
 	Warnings []string
+	// QueueCount is how many jobs this submit file asks for -- the
+	// resolved `queue` count, so a queue over a list or a file is the
+	// length of it and not 1.
+	//
+	// Zero means the file did not parse here, not that it submits
+	// nothing: a file this package cannot read is still handed to the
+	// schedd, which is the authority on what it accepts. A caller using
+	// this to decide something should treat 0 as "unknown".
+	QueueCount int
 }
 
 // Advisory is every diagnostic as plain advice: the warnings, with the
@@ -87,6 +96,7 @@ func Inspect(raw string) Inspection {
 	// Proc 0 of an arbitrary cluster: most attributes read below do not
 	// depend on the job ID, and the real cluster is not known until
 	// after the submit.
+	insp.QueueCount = sf.QueueCount()
 	ad, err := sf.MakeJobAd(htcondor.JobID{Cluster: 1, Proc: 0}, nil)
 	if err != nil {
 		return insp

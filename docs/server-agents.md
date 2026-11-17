@@ -87,6 +87,17 @@ that hold are the ones enforced on this side:
   below. This is the control to reach for when the answer to "should our
   users have agents" is yes and the answer to "should those agents be
   able to act" is no.
+- `HTTP_API_MCP_CONFIRM_SUBMIT_OVER` and
+  `HTTP_API_MCP_CONFIRM_REMOVE_OVER` stop a submission or a removal
+  above a job count and put it to the person running the client — see
+  [Asking a person before a bulk
+  operation](#asking-a-person-before-a-bulk-operation) below. Read the
+  paragraph above again first: this *is* the client prompting, and
+  everything said there about a user who approves the prompt applies to
+  it. What it adds is that the prompt is raised by this server rather
+  than by the agent's own good manners, that it carries a number the
+  person can judge, and that a client which cannot raise it is refused.
+  Both are off by default.
 - `HTTP_API_MCP_ACCESS_GROUP`, narrowed by `HTTP_API_MCP_READ_GROUP` and
   `HTTP_API_MCP_WRITE_GROUP`, decides who may drive the access point and
   whether they may change anything or only look. A read-only grant is a
@@ -142,6 +153,76 @@ not revoked; it simply buys nothing here.
 Applied on SIGHUP (or `condor_reconfig`), including for sessions already
 connected. REST clients, the web console and `condor_submit` are
 untouched: this governs the MCP tool surface, not the access point.
+
+## Asking a person before a bulk operation
+
+An agent that misreads an instruction does not misread it by one job. A
+site can put a ceiling on how far a single call may go before a person
+is asked:
+
+```
+HTTP_API_MCP_CONFIRM_SUBMIT_OVER = 50
+HTTP_API_MCP_CONFIRM_REMOVE_OVER = 50
+```
+
+Over the threshold, the tool stops and the client puts a question to
+whoever is running it — "Submit 500 jobs to this access point?", "Remove
+120 jobs? Removal cannot be undone." — naming the count and, for a
+removal, the constraint that matched. On a yes the call proceeds; on a
+no nothing happens and the agent is told the person decided, in terms
+that tell it not to retry.
+
+Both settings default to `0`, which is off, and each gates only its own
+tool: a site can ask about removals and leave submissions alone. They
+are applied on `condor_reconfig`.
+
+**The unit is jobs, deliberately.** Fifty one-minute jobs is nothing and
+a single job asking for 128 cores for three days is a great deal, and
+this gate will stop the first and not the second. It is not a resource
+limit and should not be mistaken for one — that is
+`SUBMIT_REQUIREMENT_NAMES` on the schedd, which binds every submitter
+rather than only the ones arriving through an agent, and which cannot be
+clicked through. What a job count is good for is the thing a person
+being interrupted can actually judge in the second they spend reading
+the dialog.
+
+### What it needs from the client
+
+The question is asked over MCP elicitation, and **client support for
+that is poor**, which is why these settings are off by default rather
+than set to something sensible. Before turning them on, test them with
+the clients your users actually run: a client that declares the
+capability and then silently declines or hangs will turn every gated
+call into a failure your users cannot explain.
+
+Two cases are refused outright rather than asked:
+
+- A client that declares no elicitation support, or only the URL kind.
+- Any client older than MCP protocol revision **2026-07-28**. This
+  server answers statelessly, so an older client's capabilities — sent
+  once during a handshake whose session is long gone — are not available
+  when its tool call arrives, and the protocol forbids sending a
+  question to a client that has not said it can present one. With these
+  thresholds on, an older client simply cannot make a call above them.
+
+Both are refusals, not exceptions. A gate that let calls through
+whenever asking failed would leave an operator believing in a limit they
+do not have, so the server refuses and says which end to fix. The
+refusal also tells the agent not to work around it by splitting the
+request into smaller calls.
+
+### What it costs
+
+A gated submission is counted before it is sent, from the submit file
+the agent supplied, so `queue 500` and a `queue ... from` over a
+500-item list both count as 500.
+
+A gated removal has to count the matching jobs before removing any,
+which is one extra queue query per call above the threshold — and only
+above it, since the count is skipped entirely when the setting is off.
+The number the person is shown is what matched a moment earlier; if more
+jobs match by the time they answer, they are asked again rather than
+having their approval stretched to cover a larger set.
 
 ## Disabling tools
 
