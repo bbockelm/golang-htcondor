@@ -1805,3 +1805,44 @@ rather than about where in it. That is a question about `submit_param`'s
 handling of a present-but-empty keyword with an alias, which every aliased
 keyword shares, and it is not what the ordering fix is about. The fuzzer has
 not reached it.
+
+## A size with no integer part
+
+`request_disk = .000` set `RequestDisk = 0` in condor_submit and `0.0` here:
+the nightly's find, and the visible corner of a larger family.
+
+`parse_int64_bytes` (`condor_utils/metric_units.cpp`) reads the integer part
+with `strtol`, then reads an optional fractional part, and only THEN asks
+whether the cursor moved at all. A value with no integer digits still moves it,
+because the dot does. So the whole of this is a size to condor_submit:
+
+| value | RequestDisk |
+|---|---|
+| `.5` | 1 |
+| `.5M`, `.5 M`, ` .25K` | 512, 512, 1 |
+| `.000`, `.0001` | 0 |
+| `.`, `.M` | 0 |
+| `.5,1M`, `1,.5M` | 1, with the rest read as the retry sequence |
+
+This parser asked the question before reading the fraction, so it refused all
+of them as sizes and fell through to the expression path -- which parses `.5`
+as the real 0.5 and refuses `.5M` outright. Only the first kind was visible to
+the fuzzer: when the Go side refuses a file the comparison is skipped, so the
+`.5M` half of the family was invisible and would never have been reported.
+
+A sign is not enough on its own. `strtol` takes the sign only when digits
+follow it, so it consumes nothing from `-.5`, the cursor never reaches the
+dot, and both sides read it as an expression. `-.5` and `+.5` agreed before
+this and still do.
+
+Fixed in `parseSizeWithUnits`, which every size-valued command goes through --
+`request_memory`, `request_disk`, `image_size`, `disk_usage`, `vm_memory`,
+`gpus_minimum_memory` -- and measured against the oracle for each.
+
+What is deliberately left: an integer too large for 64 bits.
+`request_disk = 99999999999999999999` saturates `strtol` to `LONG_MAX`, and
+the scaling that follows -- `(int64_t)((val + fract) * mult + base-1) / base`
+-- promotes to `double` and casts a value far outside `int64_t` back, which is
+undefined behaviour. The result is platform-dependent: `9007199254740991` on
+arm64, where the cast saturates, and the negative of that where it wraps. It
+is reachable and the fuzzer does report it, but there is nothing to match.

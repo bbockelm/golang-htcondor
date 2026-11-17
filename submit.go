@@ -2801,21 +2801,25 @@ const (
 func parseSizeWithUnits(s string, base int64) (int64, bool) {
 	p := strings.TrimLeft(s, " \t")
 
-	// Integer part.
+	// Integer part, read as strtol reads it: a sign counts only when
+	// digits follow it, so strtol consumes nothing at all from "+" or
+	// from "-.5" and leaves the cursor where it started.
 	i := 0
-	if i < len(p) && (p[i] == '+' || p[i] == '-') {
-		i++
+	val := int64(0)
+	j := 0
+	if j < len(p) && (p[j] == '+' || p[j] == '-') {
+		j++
 	}
-	digits := i
-	for i < len(p) && p[i] >= '0' && p[i] <= '9' {
-		i++
+	digits := j
+	for j < len(p) && p[j] >= '0' && p[j] <= '9' {
+		j++
 	}
-	if i == digits {
-		return 0, false
-	}
-	val, err := strconv.ParseInt(p[:i], 10, 64)
-	if err != nil {
-		return 0, false
+	if j > digits {
+		n, err := strconv.ParseInt(p[:j], 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		val, i = n, j
 	}
 
 	// Optional fractional part; HTCondor keeps three digits and ignores
@@ -2829,6 +2833,17 @@ func parseSizeWithUnits(s string, base int64) (int64, bool) {
 				scale *= 10
 			}
 		}
+	}
+
+	// parse_int64_bytes asks whether anything at all was consumed, and it
+	// asks AFTER the fractional part rather than before it. So a value
+	// with no integer digits is still a size as long as it has a dot --
+	// `request_disk = .5M` is 512 KiB and `.000` is 0 -- while a value
+	// starting with neither a digit nor a dot is an expression. A sign is
+	// not enough either, which is why `-.5` is an expression on both
+	// sides although `.5` is a size.
+	if i == 0 {
+		return 0, false
 	}
 
 	for i < len(p) && (p[i] == ' ' || p[i] == '\t') {

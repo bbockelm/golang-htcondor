@@ -55,6 +55,28 @@ func TestParseSizeWithUnits(t *testing.T) {
 		{"one byte over rounds up", "1025k", unitMiB, 2, true},
 		{"exact multiple does not round up", "2048k", unitMiB, 2, true},
 
+		// A value with no integer part is still a size. parse_int64_bytes
+		// asks whether anything was consumed AFTER reading the fractional
+		// part, so the dot carries the value on its own. Measured against
+		// the oracle; `request_disk = .000` is how the nightly found it.
+		{"fraction with no integer part", ".5", unitKiB, 1, true},
+		{"fraction with no integer part and a suffix", ".5M", unitKiB, 512, true},
+		{"fraction with no integer part, spaced suffix", ".5 M", unitKiB, 512, true},
+		{"zero written as a bare fraction", ".000", unitKiB, 0, true},
+		{"a fraction too small to round up to one", ".0001", unitKiB, 0, true},
+		{"three digits are kept, the rest ignored", ".999", unitKiB, 1, true},
+		{"a bare dot is zero", ".", unitKiB, 0, true},
+		{"a bare dot with a suffix", ".M", unitKiB, 0, true},
+		{"leading space before the dot", " .25K", unitKiB, 1, true},
+
+		// But a SIGN with no digits is not. strtol consumes nothing from
+		// "-.5" -- it takes the sign only when digits follow -- so the
+		// cursor never reaches the dot and the value is an expression.
+		{"negative bare fraction is not a size", "-.5", unitKiB, 0, false},
+		{"positive bare fraction is not a size", "+.5", unitKiB, 0, false},
+		{"negative bare fraction with a suffix", "-.5M", unitKiB, 0, false},
+		{"a sign alone", "-", unitKiB, 0, false},
+
 		// Not sizes. The caller stores these as expressions instead;
 		// what matters here is that they are reported as non-sizes
 		// rather than silently yielding a number.
