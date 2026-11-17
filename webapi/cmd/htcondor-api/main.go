@@ -166,7 +166,12 @@ func die(earlyBuf *logging.EarlyBuffer, what string, err error) {
 
 // mcpConfig holds MCP-related configuration
 type mcpConfig struct {
-	enabled              bool
+	enabled bool
+	// oauth2Disabled is HTTP_API_MCP_OAUTH2 = false: serve MCP, but
+	// authenticate its callers only by the HTCondor token they forward.
+	// Negative so the zero value serves OAuth2, which is what every
+	// deployment did before the setting existed.
+	oauth2Disabled       bool
 	skillsDir            string
 	skillsReloadInterval time.Duration
 	disabledTools        string
@@ -1533,24 +1538,33 @@ func configuredOAuth2Settings(cfg *config.Config) []string {
 }
 
 // warnUnservedOAuth2 says so when OAuth2 is configured on a server that
-// serves neither the web UI nor MCP, the two surfaces that use it.
+// serves neither the web UI nor an MCP endpoint that logs anybody in.
 //
 // The settings are read only for those surfaces, so without them an
 // operator's issuer, client and identity provider go nowhere: the first
 // sign of it is a browser login answered with "no OAuth2 provider
 // configured" by a server whose configuration plainly names one. Naming
-// the two conditions here puts the reason in the log at startup, where it
+// the conditions here puts the reason in the log at startup, where it
 // can be acted on.
-func warnUnservedOAuth2(cfg *config.Config, logger *logging.Logger) {
+//
+// mcpEnabled picks which remedy to name. A server with MCP off needs it
+// turned on; one that has it on reached here because HTTP_API_MCP_OAUTH2
+// withdrew the login, and telling that operator to enable MCP would
+// name a setting they already have.
+func warnUnservedOAuth2(cfg *config.Config, mcpEnabled bool, logger *logging.Logger) {
 	configured := configuredOAuth2Settings(cfg)
 	if len(configured) == 0 {
 		return
 	}
+	remedy := "Set HTTP_API_ENABLE_MCP = true, or run a build that embeds the web UI " +
+		"(built with -tags embed_frontend)."
+	if mcpEnabled {
+		remedy = "Unset HTTP_API_MCP_OAUTH2, or run a build that embeds the web UI " +
+			"(built with -tags embed_frontend)."
+	}
 	logger.Warn(logging.DestinationHTTP,
-		"OAuth2 is configured but this server serves neither the web UI nor MCP, "+
-			"so the OAuth2 settings are ignored and logins will be refused. "+
-			"Set HTTP_API_ENABLE_MCP = true, or run a build that embeds the web UI "+
-			"(built with -tags embed_frontend).",
+		"OAuth2 is configured but this server serves no surface that logs anybody in, "+
+			"so the OAuth2 settings are ignored and logins will be refused. "+remedy,
 		"configured", strings.Join(configured, ", "))
 }
 
@@ -1581,7 +1595,7 @@ func loadOAuth2Config(cfg *config.Config, config *mcpConfig, listenAddrFromConfi
 
 	// Load OAuth2 redirect URL
 	config.oauth2RedirectURL = loadOAuth2RedirectURL(cfg, config.oauth2Issuer,
-		httpserver.OAuth2CallbackPath(webUIEnabled, config.enabled), logger)
+		httpserver.OAuth2CallbackPath(webUIEnabled, config.enabled && !config.oauth2Disabled), logger)
 
 	// Log the user info URL if set
 	if config.oauth2UserInfoURL != "" {
@@ -1666,12 +1680,21 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 	config.oauth2DBPath = loadDBPath(cfg, logger)
 	logger.Info(logging.DestinationHTTP, "Unified DB path", "path", config.oauth2DBPath)
 
-	if !config.enabled && !webUIEnabled {
-		warnUnservedOAuth2(cfg, logger)
-		return config
+	// Whether MCP callers log in here at all. Read before the branch
+	// below, because it is half of what decides whether the OAuth2
+	// settings are read.
+	config.oauth2Disabled = config.enabled && !featureOffered(cfg, "HTTP_API_MCP_OAUTH2")
+	if config.oauth2Disabled {
+		logger.Info(logging.DestinationMCP,
+			"MCP serves no OAuth2 by configuration (HTTP_API_MCP_OAUTH2); "+
+				"callers authenticate by forwarding an HTCondor token, which the schedd validates")
 	}
 
-	loadOAuth2Config(cfg, &config, listenAddrFromConfig, webUIEnabled, logger)
+	if webUIEnabled || (config.enabled && !config.oauth2Disabled) {
+		loadOAuth2Config(cfg, &config, listenAddrFromConfig, webUIEnabled, logger)
+	} else {
+		warnUnservedOAuth2(cfg, config.enabled, logger)
+	}
 
 	if !config.enabled {
 		return config
@@ -2547,6 +2570,7 @@ func runNormalMode(earlyBuf *logging.EarlyBuffer) (rerr error) {
 		Collector:                collector,
 		Logger:                   logger,
 		EnableMCP:                mcpCfg.enabled,
+		MCPOAuth2Disabled:        mcpCfg.oauth2Disabled,
 		Reservations:             reservationsEnabled(cfg),
 		ReservationClaims:        reservationClaimsEnabled(cfg),
 		ReservationEPConstraint:  reservationEPConstraint(cfg),

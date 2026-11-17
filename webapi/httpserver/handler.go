@@ -277,6 +277,12 @@ type Handler struct {
 	// advertisement only when mcpEnabled. See HandlerConfig.WebUIEnabled.
 	webUIEnabled bool
 	mcpEnabled   bool
+	// mcpOAuth2 is whether MCP is one of those surfaces. False where
+	// MCP is served but HTTP_API_MCP_OAUTH2 is off: callers then reach
+	// it by forwarding an HTCondor token and nothing else, so the
+	// /mcp/oauth2/ spelling and /mcp's protected-resource documents
+	// describe a login this server does not offer.
+	mcpOAuth2 bool
 	// reservationsEnabled gates the whole reservation subsystem.
 	reservationsEnabled bool
 	// interactive is which of the three built-in interactive
@@ -918,6 +924,17 @@ type HandlerConfig struct {
 	// EnableMCP serves the MCP protocol endpoint (/mcp) and nothing
 	// else: OAuth2 is decided by OAuth2Enabled, which this is half of.
 	EnableMCP bool
+	// MCPOAuth2Disabled withdraws OAuth2 from the MCP endpoint
+	// (HTTP_API_MCP_OAUTH2 = false): callers authenticate by forwarding
+	// an HTCondor token, which the schedd validates, and by nothing
+	// else. A deployment behind a gateway that forwards a per-user
+	// IDTOKEN on every request never reaches the OAuth2 path, so serving
+	// an authorization server it cannot honour -- such a pod has no pool
+	// signing key -- is endpoints with no use behind them.
+	//
+	// Stated negatively so the zero value serves OAuth2, which is what
+	// every deployment did before the setting existed.
+	MCPOAuth2Disabled bool
 
 	// Reservations turns the reservation subsystem on: the admin API,
 	// the admin page and the controller that holds pool capacity ahead
@@ -1476,7 +1493,20 @@ type HandlerConfig struct {
 // once decided by EnableMCP alone, which left a web UI with MCP off
 // unable to log anybody in, with no metadata and no device flow.
 func (c HandlerConfig) OAuth2Enabled() bool {
-	return c.WebUIEnabled || c.EnableMCP
+	return c.WebUIEnabled || c.MCPOAuth2Enabled()
+}
+
+// MCPOAuth2Enabled reports whether MCP callers may log in through this
+// server's OAuth2, as opposed to forwarding an HTCondor token.
+//
+// It decides the /mcp/oauth2/ spelling of the endpoints, the callback
+// and device-verification pages under /mcp/, and the protected-resource
+// documents that name an authorization server for /mcp -- all of which
+// describe a login, so none of them belongs on a server that offers
+// none. It is NOT what gates /mcp itself: the forwarded-token path is
+// unaffected, which is the whole point of turning this off.
+func (c HandlerConfig) MCPOAuth2Enabled() bool {
+	return c.EnableMCP && !c.MCPOAuth2Disabled
 }
 
 // NewHandler creates a new HTTP API handler that can be embedded in any HTTP server
@@ -1582,6 +1612,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 		mcpBaseURL:                strings.TrimSpace(cfg.MCPBaseURL),
 		webUIEnabled:              cfg.WebUIEnabled,
 		mcpEnabled:                cfg.EnableMCP,
+		mcpOAuth2:                 cfg.MCPOAuth2Enabled(),
 		reservationsEnabled:       cfg.Reservations,
 		reservationEPConstraint:   cfg.ReservationEPConstraint,
 		reservationClaims:         cfg.ReservationClaims,
@@ -2239,7 +2270,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			CIMDAllowedHosts:     cfg.MCPCIMDAllowedHosts,
 			// The /mcp/ spelling wherever MCP is on, as it always was;
 			// without MCP that path is not routed.
-			TokenPath: oauth2EndpointPathFor(!cfg.EnableMCP, "token"),
+			TokenPath: oauth2EndpointPathFor(!cfg.MCPOAuth2Enabled(), "token"),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OAuth2 provider: %w", err)
@@ -2249,7 +2280,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 			"refresh_token_lifespan", oauth2RefreshLifespan)
 		h.oauth2Provider = oauth2Provider
 		logger.Info(logging.DestinationHTTP, "OAuth2 provider enabled", "issuer", oauth2Issuer,
-			"web_ui", cfg.WebUIEnabled, "mcp", cfg.EnableMCP)
+			"web_ui", cfg.WebUIEnabled, "mcp", cfg.MCPOAuth2Enabled())
 		// placement-client's client (placement_scope.go).
 		if err := h.seedPlacementClient(context.Background()); err != nil {
 			logger.Warn(logging.DestinationHTTP, "Could not create the placement client", "error", err)

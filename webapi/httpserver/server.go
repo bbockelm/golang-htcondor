@@ -218,6 +218,10 @@ type Config struct {
 	// shares the unified DBPath. Kept so existing callers compile.
 	TemplateUserStoreDBPath string //nolint:unused // back-compat; ignored.
 	EnableMCP               bool   // Serve MCP at /mcp. See HandlerConfig.EnableMCP.
+	// MCPOAuth2Disabled serves MCP with the forwarded-HTCondor-token
+	// path alone (HTTP_API_MCP_OAUTH2 = false). Stated negatively so the
+	// zero value serves OAuth2. See HandlerConfig.MCPOAuth2Disabled.
+	MCPOAuth2Disabled bool
 	// Reservations turns the reservation subsystem on: the admin API,
 	// the admin page and the controller that holds pool capacity. Off
 	// unless configured, because it evicts other people's jobs.
@@ -581,6 +585,7 @@ func NewServer(cfg Config) (*Server, error) {
 		MetricsCacheTTL:             cfg.MetricsCacheTTL,
 		Logger:                      cfg.Logger,
 		EnableMCP:                   cfg.EnableMCP,
+		MCPOAuth2Disabled:           cfg.MCPOAuth2Disabled,
 		Reservations:                cfg.Reservations,
 		ReservationEPConstraint:     cfg.ReservationEPConstraint,
 		ReservationStampBudget:      cfg.ReservationStampBudget,

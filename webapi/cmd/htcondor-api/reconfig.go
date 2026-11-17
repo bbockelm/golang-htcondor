@@ -287,6 +287,11 @@ var reconfigParams = []reconfigParam{
 	{name: "HTTP_API_TLS_CERT"},
 	{name: "HTTP_API_TLS_KEY"},
 
+	// Whether MCP serves OAuth2 at all. It decides which routes the mux
+	// is built with and whether the provider is constructed, both of
+	// which happen once.
+	{name: "HTTP_API_MCP_OAUTH2"},
+
 	// OAuth2 / IDP wiring, captured when the provider was constructed.
 	{name: "HTTP_API_OAUTH2_ISSUER"},
 	{name: "HTTP_API_OAUTH2_IDP"},

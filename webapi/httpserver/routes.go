@@ -374,10 +374,11 @@ func (h *Handler) setupRoutes() {
 	// Collector ping is handled via /api/v1/collector/ping in handleCollectorPath
 
 	// OAuth2: served whenever the provider exists, which is whenever the
-	// web UI or MCP is (HandlerConfig.OAuth2Enabled). MCP gates only the
-	// MCP-specific routes inside: the protocol endpoint, the /mcp/
-	// spelling of the OAuth2 endpoints, and the protected-resource
-	// documents that describe /mcp.
+	// web UI or MCP-with-OAuth2 is (HandlerConfig.OAuth2Enabled). MCP
+	// gates only the MCP-specific routes inside: the /mcp/ spelling of
+	// the OAuth2 endpoints and the protected-resource documents that
+	// describe /mcp. The protocol endpoint itself is further down,
+	// because it is served whether or not OAuth2 is.
 	if h.oauth2Provider != nil {
 		// OAuth2 metadata discovery (RFC 8414 and RFC 9068)
 		mux.HandleFunc("/.well-known/oauth-authorization-server", h.handleOAuth2Metadata)
@@ -412,7 +413,7 @@ func (h *Handler) setupRoutes() {
 			// document URL, so each charges the fetch to its caller.
 			handler = h.withCIMDSource(handler)
 			mux.HandleFunc(oauth2EndpointPathFor(true, name), handler)
-			if h.mcpEnabled {
+			if h.mcpOAuth2 {
 				mux.HandleFunc(oauth2EndpointPathFor(false, name), handler)
 			}
 		}
@@ -423,7 +424,7 @@ func (h *Handler) setupRoutes() {
 		// code's user has minutes to open it.
 		mux.HandleFunc(webUICallbackPath, h.handleOAuth2Callback)
 		mux.HandleFunc(webUIDeviceVerifyPath, h.handleOAuth2DeviceVerify)
-		if h.mcpEnabled {
+		if h.mcpOAuth2 {
 			mux.HandleFunc(mcpCallbackPath, h.handleOAuth2Callback)
 			mux.HandleFunc(mcpDeviceVerifyPath, h.handleOAuth2DeviceVerify)
 		}
@@ -431,16 +432,23 @@ func (h *Handler) setupRoutes() {
 			"path_prefix", oauth2EndpointPathFor(h.plainOAuth2Paths(), ""))
 	}
 
-	// MCP: the protocol endpoint and the documents describing it. Needs
-	// the provider too, since every MCP request is authenticated by it.
-	if h.mcpEnabled && h.oauth2Provider != nil {
-		// RFC 9728 section 3.1: a resource with a path is described at
-		// that path appended to the well-known one. MCP clients derive
-		// this URL from the server URL they were configured with, so
-		// without it they fetch a document that does not exist -- see
-		// handleOAuth2ProtectedResourceMetadata.
-		mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
-		mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
+	// MCP: the protocol endpoint and the documents describing it.
+	//
+	// The endpoint does NOT need the OAuth2 provider. mcpAuthContext has
+	// two ways in, and the forwarded-HTCondor-token one is the schedd's
+	// business, not this server's -- so a deployment that turns OAuth2
+	// off (HTTP_API_MCP_OAUTH2 = false) still serves MCP, and only the
+	// documents below, which answer "where do I log in?", drop out.
+	if h.mcpEnabled {
+		if h.mcpOAuth2 {
+			// RFC 9728 section 3.1: a resource with a path is described at
+			// that path appended to the well-known one. MCP clients derive
+			// this URL from the server URL they were configured with, so
+			// without it they fetch a document that does not exist -- see
+			// handleOAuth2ProtectedResourceMetadata.
+			mux.HandleFunc(wellKnownProtectedResource+mcpPath, h.handleOAuth2ProtectedResourceMetadata)
+			mux.HandleFunc(wellKnownProtectedResource+mcpMessagePath, h.handleOAuth2ProtectedResourceMetadata)
+		}
 
 		// MCP protocol endpoint. "/mcp" is an exact-match pattern --
 		// it does not shadow /mcp/oauth2/... -- and /mcp/message stays
@@ -463,7 +471,8 @@ func (h *Handler) setupRoutes() {
 		// under /mcp/ should still be reported wrong.
 		mux.HandleFunc(mcpPath+"/{$}", h.handleMCPTrailingSlash)
 
-		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled", "path_prefix", "/mcp", "transport", transport)
+		h.logger.Info(logging.DestinationHTTP, "MCP endpoints enabled",
+			"path_prefix", "/mcp", "transport", transport, "oauth2", h.mcpOAuth2)
 	}
 
 	// IDP endpoints (if enabled)

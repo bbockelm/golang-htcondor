@@ -99,8 +99,12 @@ const maxMCPBody = 16 << 20 // 16 MB
 // request never reaches withCondorCredential at all: mcpAuthContext's
 // forwarded-token branch builds its own security config from the bearer and
 // lets the schedd validate it. Refusing to start would break that deployment
-// over a setting none of its requests touch -- and nothing in the
-// configuration tells that deployment apart.
+// over a setting none of its requests touch.
+//
+// Such a site can now say so -- HTTP_API_MCP_OAUTH2 = false -- and the
+// oauth2Provider check below then silences this, since the login it warns
+// about is no longer served. Until it does, this stays a warning: the
+// setting is opt-in, so its absence still means "might be either".
 //
 // The hazard itself is closed per request instead: withCondorCredential now
 // returns an error rather than a credential-less context, so an OAuth2 caller
@@ -140,6 +144,22 @@ func (h *Handler) mcpAuthContext(w http.ResponseWriter, r *http.Request) (contex
 	if err != nil {
 		h.logger.Error(logging.DestinationHTTP, "Token validation failed", "error", err)
 		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token", "Invalid or missing token")
+		return nil, nil, false
+	}
+
+	// An OAuth2 token where this server's MCP endpoint takes none
+	// (HTTP_API_MCP_OAUTH2 = false). Refused here rather than left to
+	// work, so the setting means one thing in every configuration: with
+	// no web UI there is no provider and no such token exists, but with
+	// one the provider is built for the UI's own login, and a token it
+	// issued would otherwise still open MCP -- on a server that stopped
+	// advertising any way to get one.
+	if token != nil && !h.mcpOAuth2 {
+		h.logger.Warn(logging.DestinationHTTP,
+			"MCP request refused: this server's MCP endpoint accepts only a forwarded HTCondor token",
+			"setting", "HTTP_API_MCP_OAUTH2")
+		h.writeOAuthError(w, http.StatusUnauthorized, "invalid_token",
+			"This server's MCP endpoint accepts only a forwarded HTCondor token")
 		return nil, nil, false
 	}
 
@@ -368,12 +388,11 @@ func (h *Handler) handleMCPMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// validateOAuth2Token validates an OAuth2 token from the Authorization header
+// validateOAuth2Token validates an OAuth2 token from the Authorization header.
+//
+// A nil token with a nil error means "not ours, forward it to the schedd as
+// a HTCondor IDTOKEN" -- the caller's forwarded-token branch.
 func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, error) {
-	if h.oauth2Provider == nil {
-		return nil, fmt.Errorf("OAuth2 not configured")
-	}
-
 	// Extract token from Authorization header
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
@@ -386,6 +405,17 @@ func (h *Handler) validateOAuth2Token(r *http.Request) (fosite.AccessRequester, 
 	}
 
 	tokenString := parts[1]
+
+	// No authorization server here, so every bearer is a forwarded
+	// HTCondor token and the schedd is what verifies it. The
+	// classification below exists only to keep a token this server
+	// issued from being laundered to the schedd after fosite rejected
+	// it; with no provider there are no tokens of ours for that to
+	// happen to, and anything else would reject the credentials this
+	// deployment runs entirely on. See HandlerConfig.MCPOAuth2Disabled.
+	if h.oauth2Provider == nil {
+		return nil, nil
+	}
 
 	// First try to validate as OAuth2 token using fosite
 	ctx := r.Context()

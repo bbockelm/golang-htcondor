@@ -13,6 +13,11 @@ assistant. OAuth2 itself is served whenever the web UI **or** MCP is
 enabled — see
 [When OAuth2 is served](server-auth.md#when-oauth2-is-served).
 
+A deployment whose callers all arrive through a gateway that forwards a
+per-user HTCondor IDTOKEN can set `HTTP_API_MCP_OAUTH2 = false`. MCP is
+served as before and every OAuth2 endpoint is withdrawn — see [MCP
+without OAuth2](server-auth.md#mcp-without-oauth2).
+
 The standalone `htcondor-mcp` binary speaks the same protocol over
 stdio. The tool catalogue is in
 [mcpserver/README.md](../webapi/mcpserver/README.md).

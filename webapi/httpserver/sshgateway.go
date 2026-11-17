@@ -369,7 +369,7 @@ func (h *Handler) startSSHGateway(ctx context.Context, issuer string) error {
 // so the gateway keeps the path it has always used wherever that is
 // still routed.
 func (h *Handler) gatewayOAuth2Path(name string) string {
-	return oauth2EndpointPathFor(!h.mcpEnabled, name)
+	return oauth2EndpointPathFor(!h.mcpOAuth2, name)
 }
 
 // probeSSHGatewayIssuer checks, once, that the device endpoint the
