@@ -159,10 +159,17 @@ func TestRoundTripUnderTheThresholdAsksNobody(t *testing.T) {
 	}
 }
 
-// A client that declares no elicitation support is refused, not waved
-// through. This is the fail-closed half, over the wire: the server has
-// no way to ask, so it does not act.
-func TestRoundTripClientWithoutElicitationIsRefused(t *testing.T) {
+// A client that declares no elicitation support is NOT blocked.
+//
+// The gate asks whoever can be asked and gets out of the way of whoever
+// cannot. Refusing instead would make these settings unusable at a site
+// whose users are on clients that cannot present a question: the
+// thresholds would not gate bulk work, they would forbid it.
+//
+// What this costs is stated plainly in the docs and logged at WARN on
+// every skip, because an operator who sets a threshold here does not
+// thereby have a limit.
+func TestRoundTripClientWithoutElicitationIsNotBlocked(t *testing.T) {
 	ts := confirmRoundTripServer(t, 50)
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	sess := connectAt(t, ts, client, protocolVersionV2)
@@ -173,15 +180,11 @@ func TestRoundTripClientWithoutElicitationIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("a 500-job submission went through a client that cannot be asked")
-	}
+	// It reaches the schedd and fails to find one, which is what a
+	// submission that was not gated looks like here.
 	text := sdkResultText(res)
-	if !strings.Contains(text, "HTTP_API_MCP_CONFIRM_SUBMIT_OVER") {
-		t.Fatalf("the call failed for some reason other than the gate: %s", text)
-	}
-	if strings.Contains(text, "connect") {
-		t.Errorf("the submission reached the schedd despite the gate: %s", text)
+	if !res.IsError || !strings.Contains(text, "connect") {
+		t.Fatalf("the submission did not reach the schedd: %s", text)
 	}
 }
 
@@ -202,25 +205,26 @@ func TestRoundTripDefaultAsksNobody(t *testing.T) {
 	}
 }
 
-// A client older than the 2026-07-28 protocol is REFUSED, not asked.
+// A client older than the 2026-07-28 protocol is not asked, and is not
+// blocked either.
 //
-// This is a limitation, pinned here because it is invisible from the
-// code and surprising. The server serves MCP statelessly, so an older
-// client's capabilities -- declared once, during an initialize whose
-// session is gone by the time the tool call arrives -- are not available
-// to the handler: the SDK synthesizes an InitializeParams carrying the
-// protocol version and no capabilities at all. The server cannot know
-// whether this client could present a question, and the spec forbids
-// sending one to a client that has not said it can.
+// The reason it cannot be asked is worth knowing and is invisible from
+// the code: this server answers MCP statelessly, so an older client's
+// capabilities -- declared once, during a handshake whose session is
+// gone by the time the tool call arrives -- are not available to the
+// handler. The SDK synthesizes an InitializeParams carrying the
+// protocol version and nothing else, so the server cannot tell whether
+// this client could present a question, and the spec forbids sending
+// one to a client that has not said it can.
 //
-// Fail-closed is the only safe reading of "I cannot tell". An operator
-// enabling these thresholds is enabling a gate that, for older clients,
-// is a flat refusal, and that is a thing to know before turning it on
-// rather than after.
+// So for these clients the threshold does nothing at all. That is the
+// behaviour to understand before turning it on: at a site still on
+// older clients, setting a threshold buys a log line and no gate.
 //
 // If a later SDK makes an older client's capabilities readable in
-// stateless mode, this is the test that should start failing.
-func TestRoundTripOlderProtocolClientIsRefusedNotAsked(t *testing.T) {
+// stateless mode, this is the test that should start failing -- at
+// which point these clients start being asked.
+func TestRoundTripOlderProtocolClientIsNeitherAskedNorBlocked(t *testing.T) {
 	ts := confirmRoundTripServer(t, 50)
 	var asked atomic.Int64
 	sess := connectAt(t, ts, answeringClient("accept", &asked, nil), "2025-06-18")
@@ -234,21 +238,9 @@ func TestRoundTripOlderProtocolClientIsRefusedNotAsked(t *testing.T) {
 	if asked.Load() != 0 {
 		t.Fatalf("an older client was asked %d times; if the SDK now carries its capabilities, the gate can ask it", asked.Load())
 	}
-	if !res.IsError {
-		t.Fatal("a 500-job submission went through an older client unasked")
-	}
 	text := sdkResultText(res)
-	if !strings.Contains(text, "HTTP_API_MCP_CONFIRM_SUBMIT_OVER") {
-		t.Fatalf("the call failed for some reason other than the gate: %s", text)
-	}
-	// The refusal has to say WHY, and the why here is the client's age:
-	// telling this user to enable elicitation would send them hunting
-	// for a setting that would not help.
-	if !strings.Contains(text, "2026-07-28") {
-		t.Errorf("the refusal does not tell the user their client is too old: %s", text)
-	}
-	if strings.Contains(text, "connect") {
-		t.Errorf("the submission reached the schedd despite the gate: %s", text)
+	if !res.IsError || !strings.Contains(text, "connect") {
+		t.Fatalf("an older client's submission did not reach the schedd: %s", text)
 	}
 }
 

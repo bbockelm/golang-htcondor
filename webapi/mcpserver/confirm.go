@@ -57,11 +57,22 @@ import (
 //
 // # What happens when the client cannot be asked
 //
-// It is refused, not allowed through. A gate that waves calls past
-// whenever the asking fails is worse than no gate: the operator believes
-// a limit is in force and it is not. So a client that cannot carry an
-// elicitation is told the threshold stopped the call and told how to
-// proceed. See errConfirmUnavailable.
+// The call proceeds, and the skip is logged at WARN.
+//
+// This is a deliberate choice between two bad options, and the one not
+// taken deserves stating: refusing instead would mean that turning a
+// threshold on does not gate bulk operations for an incompatible client
+// but BLOCKS them, which for a site whose users are mostly on clients
+// older than 2026-07-28 is not a safety feature at all -- it is an
+// outage with a polite message. Letting the call through keeps the
+// threshold a gate for the clients that can honour it and a no-op for
+// the rest.
+//
+// The cost is the thing to be honest about: an operator who sets a
+// threshold does NOT thereby have a limit. Every skip is logged with
+// the count, the operation and the reason, so "the gate is not firing"
+// is something an operator can see rather than infer. That log line is
+// load-bearing -- it is the only evidence the limit was not applied.
 
 // confirmRequestID is the key for this server's confirmation in the
 // InputRequests/InputResponses maps. One id, because a call never asks
@@ -179,9 +190,9 @@ func elicitSupportFromCapabilities(caps *mcp.ClientCapabilities) elicitSupport {
 // its call is about and before it acts on any of them.
 //
 // It returns (nil, nil) to proceed -- the threshold is off, the count is
-// under it, or the person has already said yes -- and otherwise either a
-// *confirmationRequired to return to the caller, or an error that is the
-// person's "no" or the refusal for a client that cannot be asked.
+// under it, the person has already said yes, or this client cannot be
+// asked at all -- a *confirmationRequired to put the question, or an
+// error carrying the person's "no".
 //
 // detail is the specifics for the question: the constraint for a removal,
 // nothing for a submission. It is shown to a person, so it is quoted
@@ -205,9 +216,21 @@ func (s *Server) confirmBulk(ctx context.Context, kind bulkConfirmKind, count in
 		return nil, nil
 	}
 
+	// A client that cannot present the question does not block the call:
+	// see "What happens when the client cannot be asked" above. It is
+	// logged every time, because this line is the only record that a
+	// configured threshold was not applied, and an operator reading
+	// these is the one who finds out their gate reaches nobody.
 	support := elicitSupportFrom(ctx)
 	if !support.OK {
-		return nil, errConfirmUnavailable(kind, count, threshold, support.Why)
+		s.logger.Warn(logging.DestinationMCP,
+			"Allowing a bulk job operation unconfirmed: this client cannot be asked",
+			"operation", string(kind),
+			"jobs", count,
+			"threshold", threshold,
+			"reason", support.Why,
+			"actor", htcondor.GetAuthenticatedUserFromContext(ctx))
+		return nil, nil
 	}
 
 	state, err := json.Marshal(confirmState{Kind: kind, Count: count})
@@ -327,27 +350,6 @@ func errConfirmDeclined(kind bulkConfirmKind, action string) error {
 		"ask the person whether they want it before trying again", what)
 }
 
-// errConfirmUnavailable is what a caller gets when the threshold stopped
-// the call and the client cannot be asked to approve it.
-//
-// It names the setting and both ways out, because the two people who can
-// act on it -- the user and the operator -- need different ones, and
-// neither is reading this server's logs. It deliberately tells the agent
-// not to split the work into under-threshold calls: that defeats the
-// gate, and an agent told about a threshold will otherwise find that by
-// itself.
-func errConfirmUnavailable(kind bulkConfirmKind, count, threshold int, why string) error {
-	what, setting := "submitting", "HTTP_API_MCP_CONFIRM_SUBMIT_OVER"
-	if kind == confirmRemove {
-		what, setting = "removing", "HTTP_API_MCP_CONFIRM_REMOVE_OVER"
-	}
-	return fmt.Errorf("this access point asks a person to confirm before %s more than %d jobs (%s), and this call is for %d; "+
-		"it cannot ask, because %s, so nothing was done. "+
-		"Tell the person they can do this from a shell on the access point, or ask their administrator to change %s. "+
-		"Do not work around this by splitting the request into smaller calls",
-		what, threshold, setting, count, why, setting)
-}
-
 // SetConfirmThresholds sets the job counts above which submit_job and
 // remove_jobs ask a person first. Zero turns a gate off. It is the
 // dynamic half of the two settings: a reconfigure calls this.
@@ -376,7 +378,7 @@ func (s *Server) SetConfirmThresholds(submitOver, removeOver int) {
 		s.logger.Info(logging.DestinationMCP,
 			"MCP will ask the person running the client to confirm bulk job operations",
 			"submit_over", submitOver, "remove_over", removeOver,
-			"note", "a client that cannot be asked is refused, not allowed through")
+			"note", "a client that cannot present the question proceeds unasked; each skip is logged at WARN")
 	}
 }
 

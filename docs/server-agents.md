@@ -95,9 +95,11 @@ that hold are the ones enforced on this side:
   paragraph above again first: this *is* the client prompting, and
   everything said there about a user who approves the prompt applies to
   it. What it adds is that the prompt is raised by this server rather
-  than by the agent's own good manners, that it carries a number the
-  person can judge, and that a client which cannot raise it is refused.
-  Both are off by default.
+  than by the agent's own good manners, and that it carries a number the
+  person can judge. It is the weakest control on this list — a client
+  that cannot present the question proceeds without one — so it belongs
+  beside the others rather than instead of them. Both are off by
+  default.
 - `HTTP_API_MCP_ACCESS_GROUP`, narrowed by `HTTP_API_MCP_READ_GROUP` and
   `HTTP_API_MCP_WRITE_GROUP`, decides who may drive the access point and
   whether they may change anything or only look. A read-only grant is a
@@ -195,21 +197,40 @@ the clients your users actually run: a client that declares the
 capability and then silently declines or hangs will turn every gated
 call into a failure your users cannot explain.
 
-Two cases are refused outright rather than asked:
+Two kinds of client cannot be asked:
 
-- A client that declares no elicitation support, or only the URL kind.
+- One that declares no elicitation support, or only the URL kind.
 - Any client older than MCP protocol revision **2026-07-28**. This
   server answers statelessly, so an older client's capabilities — sent
   once during a handshake whose session is long gone — are not available
   when its tool call arrives, and the protocol forbids sending a
-  question to a client that has not said it can present one. With these
-  thresholds on, an older client simply cannot make a call above them.
+  question to a client that has not said it can present one.
 
-Both are refusals, not exceptions. A gate that let calls through
-whenever asking failed would leave an operator believing in a limit they
-do not have, so the server refuses and says which end to fix. The
-refusal also tells the agent not to work around it by splitting the
-request into smaller calls.
+**Such a call proceeds unasked.** The threshold gates the clients that
+can honour it and does nothing for the rest. The alternative — refusing
+— would mean that at a site whose users are mostly on older clients,
+setting a threshold does not gate bulk work but forbids it, which is an
+outage rather than a safeguard.
+
+So be clear about what these settings are and are not. They are not a
+limit. A threshold is a prompt for the clients that can show one, and
+for everyone else it is nothing at all. If you need a bound that holds
+regardless of what the caller is running, that is
+`SUBMIT_REQUIREMENT_NAMES` on the schedd, or
+`HTTP_API_MCP_READ_ONLY`.
+
+Every skipped confirmation is logged at `WARN`, naming the operation,
+the job count, the threshold and why the client could not be asked:
+
+```
+Allowing a bulk job operation unconfirmed: this client cannot be asked
+  operation=remove jobs=4096 threshold=50
+  reason="this client did not say whether it can ask anyone, ..."
+```
+
+That line is worth watching after turning a threshold on. A steady
+stream of it means the gate is reaching nobody, and the fix is the
+users' clients rather than the setting.
 
 ### What it costs
 

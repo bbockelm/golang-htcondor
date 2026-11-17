@@ -3,9 +3,12 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -88,29 +91,27 @@ func TestThresholdsAreIndependent(t *testing.T) {
 	}
 }
 
-// THE failure this gate must not have. A client that cannot be asked is
-// refused, never waved through: an operator who set a threshold and got
-// no gate has a limit they believe in and do not have.
-func TestClientThatCannotBeAskedIsRefused(t *testing.T) {
+// A client that cannot be asked does NOT block the call.
+//
+// The alternative -- refusing -- would mean that turning a threshold on
+// does not gate bulk work for an incompatible client but stops it dead,
+// which for a site whose users are mostly on clients older than
+// 2026-07-28 is an outage rather than a safeguard.
+//
+// The cost is real and is accepted knowingly: a configured threshold is
+// not a limit, only a gate for the clients that can honour it. What
+// makes that survivable is the log line, which is asserted below.
+func TestClientThatCannotBeAskedIsNotBlocked(t *testing.T) {
 	s := confirmServer(t, 50, 50)
 
 	// A bare context is what the built-in JSON-RPC transport provides:
 	// it records nothing, because it cannot ask anyone.
 	ask, err := s.confirmBulk(context.Background(), confirmRemove, 500, "true")
+	if err != nil {
+		t.Fatalf("a client that cannot be asked was refused: %v", err)
+	}
 	if ask != nil {
 		t.Fatal("a client that cannot be asked was handed a question it cannot present")
-	}
-	if err == nil {
-		t.Fatal("a call over the threshold was allowed through a client that cannot be asked")
-	}
-	for _, want := range []string{"HTTP_API_MCP_CONFIRM_REMOVE_OVER", "50", "500", "nothing was done"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal does not mention %q: %s", want, err)
-		}
-	}
-	// It must not teach the agent the workaround it is forbidding.
-	if !strings.Contains(err.Error(), "Do not work around this by splitting") {
-		t.Errorf("the refusal does not tell the agent against splitting the call: %s", err)
 	}
 }
 
@@ -310,15 +311,19 @@ func TestSubmitJobIsGatedBeforeItSubmits(t *testing.T) {
 	s := confirmServer(t, 50, 0)
 	params := []byte(`{"name":"submit_job","arguments":{"submit_file":"executable = /bin/sleep\ntransfer_executable = False\narguments = 60\nqueue 500\n"}}`)
 
-	_, err := s.handleCallTool(context.Background(), params)
-	if err == nil {
-		t.Fatal("a 500-job submission went through a threshold of 50")
+	res, err := s.handleCallTool(canAsk(nil, ""), params)
+	if err != nil {
+		t.Fatalf("the call failed instead of asking: %v", err)
 	}
-	if !strings.Contains(err.Error(), "HTTP_API_MCP_CONFIRM_SUBMIT_OVER") {
-		t.Fatalf("the call failed for some other reason than the gate: %v", err)
+	ask, ok := res.(*confirmationRequired)
+	if !ok {
+		t.Fatalf("a 500-job submission was not put to the person; got %T", res)
 	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("the refusal does not say how many jobs were asked for: %v", err)
+	if ask.Count != 500 {
+		t.Errorf("asked about %d jobs, want 500", ask.Count)
+	}
+	if ask.Kind != confirmSubmit {
+		t.Errorf("asked about a %s, want a submit", ask.Kind)
 	}
 }
 
@@ -330,12 +335,12 @@ func TestSubmitJobUnderTheThresholdReachesTheSchedd(t *testing.T) {
 	s := confirmServer(t, 50, 0)
 	params := []byte(`{"name":"submit_job","arguments":{"submit_file":"executable = /bin/sleep\ntransfer_executable = False\narguments = 60\nqueue 10\n"}}`)
 
-	_, err := s.handleCallTool(context.Background(), params)
+	res, err := s.handleCallTool(canAsk(nil, ""), params)
+	if _, asked := res.(*confirmationRequired); asked {
+		t.Fatal("10 jobs under a threshold of 50 were put to the person")
+	}
 	if err == nil {
 		t.Fatal("expected the submission to fail with no schedd to submit to")
-	}
-	if strings.Contains(err.Error(), "HTTP_API_MCP_CONFIRM_SUBMIT_OVER") {
-		t.Fatalf("10 jobs were stopped by a threshold of 50: %v", err)
 	}
 }
 
@@ -354,12 +359,16 @@ func TestTheCountIsJobsNotQueueStatements(t *testing.T) {
 	submit := "executable = /bin/sleep\ntransfer_executable = False\narguments = $(name)\nqueue name from (\n" + items.String() + ")\n"
 	params := []byte(`{"name":"submit_job","arguments":{"submit_file":` + jsonQuote(submit) + `}}`)
 
-	_, err := s.handleCallTool(context.Background(), params)
-	if err == nil || !strings.Contains(err.Error(), "HTTP_API_MCP_CONFIRM_SUBMIT_OVER") {
-		t.Fatalf("a 500-item queue list was not counted as 500 jobs: %v", err)
+	res, err := s.handleCallTool(canAsk(nil, ""), params)
+	if err != nil {
+		t.Fatalf("the call failed instead of asking: %v", err)
 	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("the refusal does not say 500 jobs: %v", err)
+	ask, ok := res.(*confirmationRequired)
+	if !ok {
+		t.Fatalf("a 500-item queue list was not put to the person; got %T", res)
+	}
+	if ask.Count != 500 {
+		t.Errorf("a 500-item queue list was counted as %d jobs", ask.Count)
 	}
 }
 
@@ -369,4 +378,66 @@ func jsonQuote(s string) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// The skip is logged, with everything an operator needs to act on it.
+//
+// This test carries more weight than its size suggests. A threshold set
+// at a site whose clients cannot be asked is not a limit -- the calls go
+// through -- and this log line is the ONLY evidence that happened. An
+// operator who cannot see it has a safeguard they believe in and do not
+// have, so the line is part of the feature, not decoration around it.
+func TestTheSkipIsLogged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.log")
+	logger, err := logging.New(&logging.Config{
+		OutputPath:        path,
+		DefaultLevel:      logging.VerbosityDebug,
+		SkipGlobalInstall: true,
+	})
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	s, err := NewServer(Config{
+		ScheddName:        "test",
+		ScheddAddr:        "127.0.0.1:9618",
+		ConfirmRemoveOver: 50,
+		Logger:            logger,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	// A client that cannot be asked, removing far more than the
+	// threshold: the call proceeds and the skip is recorded.
+	if ask, err := s.confirmBulk(context.Background(), confirmRemove, 4096, "true"); err != nil || ask != nil {
+		t.Fatalf("expected the call to proceed unasked, got (%v, %v)", ask, err)
+	}
+
+	written, err := os.ReadFile(path) //nolint:gosec // G304: a path this test just created
+	if err != nil {
+		t.Fatalf("reading the log: %v", err)
+	}
+	got := string(written)
+	// The count and the threshold, so the operator can see how far past
+	// the limit the call went; the operation, so they know which setting
+	// is involved; and the reason, so they know which end to fix.
+	for _, want := range []string{"unconfirmed", "4096", "50", "remove"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the skip log does not mention %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "WARN") && !strings.Contains(got, "level=WARN") {
+		t.Errorf("the skip was not logged at WARN, so it will not stand out:\n%s", got)
+	}
+
+	// And a call that IS asked about logs no skip, or the line would
+	// mean nothing.
+	before := len(got)
+	if ask, err := s.confirmBulk(canAsk(nil, ""), confirmRemove, 4096, "true"); err != nil || ask == nil {
+		t.Fatalf("expected a question, got (%v, %v)", ask, err)
+	}
+	after, _ := os.ReadFile(path) //nolint:gosec // G304: a path this test just created
+	if strings.Count(string(after), "unconfirmed") != strings.Count(got[:before], "unconfirmed") {
+		t.Errorf("a call that was properly asked about also logged a skip:\n%s", string(after))
+	}
 }

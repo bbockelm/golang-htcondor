@@ -1748,7 +1748,7 @@ func loadMCPConfig(cfg *config.Config, listenAddrFromConfig string, webUIEnabled
 			"MCP will ask the person running the client to confirm bulk job operations",
 			"submit_over", config.confirmSubmitOver,
 			"remove_over", config.confirmRemoveOver,
-			"note", "this needs client elicitation support; a client that cannot be asked is refused, not allowed through")
+			"note", "this needs client elicitation support; a client that cannot be asked proceeds unasked, logged at WARN, so this is a prompt and not a limit")
 	}
 
 	loadMCPRedaction(cfg, &config)
