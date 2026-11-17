@@ -161,3 +161,105 @@ func TestStarterDialOnlyUsesConfiguredBrokers(t *testing.T) {
 		}
 	}
 }
+
+// hangingStarter accepts CEDAR connections, reads the resumption request and
+// then hangs up without answering -- the shape a reversed connection takes
+// when something between the execute node and this process drops it partway
+// through the handshake.
+type hangingStarter struct {
+	addr string
+
+	mu       sync.Mutex
+	attempts int
+}
+
+func newHangingStarter(t *testing.T) *hangingStarter {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // test-only loopback listener
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	hs := &hangingStarter{addr: fmt.Sprintf("<%s>", ln.Addr())}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				hs.mu.Lock()
+				hs.attempts++
+				hs.mu.Unlock()
+				buf := make([]byte, 64)
+				_, _ = conn.Read(buf)
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return hs
+}
+
+func (hs *hangingStarter) count() int {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return hs.attempts
+}
+
+// TestBrokenStarterExchangeIsWorthTheOtherCCBMode is the seam between this
+// repo and cedar, and it only closes with cedar v0.7.15 or newer.
+//
+// A pinned session -- the schedd-minted claim dialStarter puts in a one-shot
+// cache -- used to be evicted by the first failed exchange, so the retry
+// reported "pre-registered session not found in cache": an error about this
+// process's own cache, carrying no I/O cause. fallbackWorthwhile reads that
+// cause to tell a broken path from a refused session, so the streaming
+// fallback could never engage no matter what had actually gone wrong.
+//
+// With the session kept, the retry fails the way the first attempt did and
+// the cause survives to be read here.
+func TestBrokenStarterExchangeIsWorthTheOtherCCBMode(t *testing.T) {
+	starter := newHangingStarter(t)
+	info := &JobConnectInfo{StarterAddr: starter.addr, ClaimID: validTestClaimID(t)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cl, err := info.dialStarter(ctx, startSSHDCommand, nil)
+	if err == nil {
+		_ = cl.Close()
+		t.Fatal("the dial succeeded against a starter that hung up")
+	}
+	if starter.count() == 0 {
+		t.Fatal("the starter was never reached")
+	}
+
+	var resumption *security.SessionResumptionError
+	if !errors.As(err, &resumption) {
+		t.Fatalf("err = %v, want a session resumption error", err)
+	}
+	if resumption.Reason == "pre-registered session not found in cache" {
+		t.Fatalf("the retry blamed our own cache, so the real failure is unreported: %v", err)
+	}
+	if !fallbackWorthwhile(ccbModeReverse, err) {
+		t.Errorf("a broken exchange was not judged worth the other CCB mode: %v", err)
+	}
+}
+
+// The complement: a starter that answers "I have no such session" is stating
+// a fact about the session, not about the path, and the broker-relayed mode
+// reaches the same starter. That must not trigger a second dial.
+func TestRefusedStarterSessionIsNotWorthTheOtherCCBMode(t *testing.T) {
+	starter := newRefusingStarter(t)
+	info := &JobConnectInfo{StarterAddr: starter.addr, ClaimID: validTestClaimID(t)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cl, err := info.dialStarter(ctx, startSSHDCommand, nil)
+	if err == nil {
+		_ = cl.Close()
+		t.Fatal("the dial succeeded against a starter that refused the session")
+	}
+	if fallbackWorthwhile(ccbModeReverse, err) {
+		t.Errorf("a refused session was judged worth the other CCB mode: %v", err)
+	}
+}
