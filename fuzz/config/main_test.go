@@ -30,6 +30,9 @@ func TestMain(m *testing.M) {
 		oracleHas = probeOracleTraits()
 		probed = maps.Clone(oracleHas)
 		fmt.Fprintf(os.Stderr, "config oracle traits:%s\n", describeTraits(oracleHas))
+		if w := libcWarning(); w != "" {
+			fmt.Fprint(os.Stderr, w)
+		}
 	}
 
 	code := m.Run()
