@@ -34,9 +34,10 @@ const (
 //
 // The /mcp/ spelling is kept only where MCP is the whole surface: that is
 // what such a server has always advertised. With a web UI the plain path
-// is what a person should see; without MCP the /mcp/ one is not routed.
-func plainOAuth2Paths(webUIEnabled, mcpEnabled bool) bool {
-	return webUIEnabled || !mcpEnabled
+// is what a person should see; without MCP -- or with MCP serving only
+// forwarded HTCondor tokens -- the /mcp/ one is not routed.
+func plainOAuth2Paths(webUIEnabled, mcpOAuth2 bool) bool {
+	return webUIEnabled || !mcpOAuth2
 }
 
 // OAuth2CallbackPath is the path a server with this surface advertises as
@@ -47,8 +48,8 @@ func plainOAuth2Paths(webUIEnabled, mcpEnabled bool) bool {
 // already in flight across a restart or an upgrade comes back to whichever
 // path it was started with; answering only the current one would strand
 // it.
-func OAuth2CallbackPath(webUIEnabled, mcpEnabled bool) string {
-	if plainOAuth2Paths(webUIEnabled, mcpEnabled) {
+func OAuth2CallbackPath(webUIEnabled, mcpOAuth2 bool) string {
+	if plainOAuth2Paths(webUIEnabled, mcpOAuth2) {
 		return webUICallbackPath
 	}
 	return mcpCallbackPath
@@ -82,7 +83,7 @@ func oauth2EndpointPathFor(plain bool, name string) string {
 // plainOAuth2Paths reports whether this server advertises its OAuth2
 // endpoints under /oauth2/. See the package-level function.
 func (h *Handler) plainOAuth2Paths() bool {
-	return plainOAuth2Paths(h.webUIEnabled, h.mcpEnabled)
+	return plainOAuth2Paths(h.webUIEnabled, h.mcpOAuth2)
 }
 
 // oauth2EndpointPath is the path this server advertises for an OAuth2
@@ -102,7 +103,7 @@ func (h *Handler) oauth2EndpointPath(name string) string {
 
 // oauth2CallbackPath is the redirect URI path this server advertises.
 func (h *Handler) oauth2CallbackPath() string {
-	return OAuth2CallbackPath(h.webUIEnabled, h.mcpEnabled)
+	return OAuth2CallbackPath(h.webUIEnabled, h.mcpOAuth2)
 }
 
 // deviceVerifyPath is the path this server puts in a device

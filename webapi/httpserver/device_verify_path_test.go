@@ -85,30 +85,34 @@ func startDeviceVerifyServerWith(t *testing.T, webUI, mcp bool) *Server {
 }
 
 // The advertised path follows what this server actually serves: the
-// /mcp/ spelling only where MCP is all there is.
+// /mcp/ spelling only where an MCP endpoint that logs people in is all
+// there is.
 //
 // Every combination, through the choice itself. Test builds do not embed
 // the frontend, so anything keyed off the build exercises one branch and
 // passes against a function that ignores the flag entirely.
 func TestAdvertisedDeviceVerifyPathFollowsTheSurface(t *testing.T) {
 	for _, tc := range []struct {
-		webUI, mcp bool
-		want       string
+		webUI, mcpOAuth2 bool
+		want             string
 	}{
-		{webUI: false, mcp: true, want: "/mcp/oauth2/device/verify"},
-		{webUI: true, mcp: true, want: "/oauth2/device/verify"},
-		{webUI: true, mcp: false, want: "/oauth2/device/verify"},
-		{webUI: false, mcp: false, want: "/oauth2/device/verify"},
+		{webUI: false, mcpOAuth2: true, want: "/mcp/oauth2/device/verify"},
+		{webUI: true, mcpOAuth2: true, want: "/oauth2/device/verify"},
+		{webUI: true, mcpOAuth2: false, want: "/oauth2/device/verify"},
+		// MCP serving only forwarded HTCondor tokens counts as no MCP
+		// here: the /mcp/ spelling is not routed, so advertising it
+		// would send a device-flow user to a 404.
+		{webUI: false, mcpOAuth2: false, want: "/oauth2/device/verify"},
 	} {
-		h := &Handler{webUIEnabled: tc.webUI, mcpEnabled: tc.mcp}
+		h := &Handler{webUIEnabled: tc.webUI, mcpEnabled: true, mcpOAuth2: tc.mcpOAuth2}
 		if got := h.deviceVerifyPath(); got != tc.want {
-			t.Errorf("web UI %v, MCP %v: %q, want %q", tc.webUI, tc.mcp, got, tc.want)
+			t.Errorf("web UI %v, MCP OAuth2 %v: %q, want %q", tc.webUI, tc.mcpOAuth2, got, tc.want)
 		}
 		// It tracks the callback's choice rather than diverging from
 		// it: both are user-visible OAuth2 URLs on the same server.
 		if strings.HasPrefix(h.deviceVerifyPath(), "/mcp/") != strings.HasPrefix(h.oauth2CallbackPath(), "/mcp/") {
-			t.Errorf("web UI %v, MCP %v: device verify is at %q while the callback is at %q; they should agree",
-				tc.webUI, tc.mcp, h.deviceVerifyPath(), h.oauth2CallbackPath())
+			t.Errorf("web UI %v, MCP OAuth2 %v: device verify is at %q while the callback is at %q; they should agree",
+				tc.webUI, tc.mcpOAuth2, h.deviceVerifyPath(), h.oauth2CallbackPath())
 		}
 	}
 }

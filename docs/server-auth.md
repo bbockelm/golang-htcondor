@@ -103,7 +103,8 @@ The OAuth2 authorization server — its metadata at `/.well-known/oauth-authoriz
 `/oauth2/*` endpoints (authorize, token, device authorization and
 verification, introspect, revoke, register, the SSO callback) and the
 admin client and token pages — is served whenever the **web UI or MCP**
-is enabled. `HTTP_API_ENABLE_MCP` gates only MCP: with it off, a server
+is enabled -- unless MCP has withdrawn it, for which see [MCP without
+OAuth2](#mcp-without-oauth2). `HTTP_API_ENABLE_MCP` gates only MCP: with it off, a server
 with the web UI still serves all of the above, but not `/mcp`, not the
 `/mcp/oauth2/*` spelling of the endpoints, not the protected-resource
 documents for `/mcp`, and does not advertise `mcp:read` / `mcp:write`.
@@ -111,6 +112,38 @@ The web UI counts as enabled when it is compiled in (the
 `embed_frontend` build). The endpoints are advertised under
 `/mcp/oauth2/` only on a server whose only surface is MCP; both
 spellings are routed wherever MCP is on.
+
+## MCP without OAuth2
+
+Some deployments never use it. An MCP gateway in front of this server can
+forward a per-user HTCondor IDTOKEN as `Authorization: Bearer` on every
+request, which `mcpAuthContext` passes to the schedd to validate — the
+pod needs no pool signing key and mints nothing. On such a server the
+OAuth2 endpoints are surface with nothing behind them: a login reaching
+them is refused, because refusing it is the only honest answer.
+
+`HTTP_API_MCP_OAUTH2 = false` says so. MCP is served exactly as before
+for a caller that forwards a token, and everything that describes a login
+is withdrawn:
+
+- The authorization server is not built (unless the web UI needs it), so
+  `/.well-known/oauth-authorization-server`, `/oauth2/*` and the admin
+  client and token pages are not served.
+- The `/mcp/oauth2/*` spelling, the `/mcp/` callback and device
+  verification pages, and the RFC 9728 protected-resource documents for
+  `/mcp` and `/mcp/message` are not routed.
+- An OAuth2 token presented to `/mcp` is refused with 401, so the setting
+  means the same thing on a server that also serves the web UI as on one
+  that does not.
+- The startup warning about having no way to mint a per-caller credential
+  is not logged: it describes a login this server no longer offers.
+
+A request with no credential at all is still refused. The web UI, which
+needs OAuth2 to log anybody in, is unaffected: with the UI compiled in,
+the authorization server is still built and still serves `/oauth2/*`.
+
+The default is `true` — every deployment served OAuth2 before this
+setting existed. It is read at startup; changing it needs a restart.
 
 ## Local identity mapping
 

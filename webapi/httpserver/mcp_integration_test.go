@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
+	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
@@ -213,6 +214,14 @@ func TestMCPHTTPIntegration(t *testing.T) {
 	t.Log("Step 7: Testing forward path with a raw HTCondor IDTOKEN...")
 	testMCPForwardRawCondorToken(t, client, baseURL, passwordsDir, trustDomain, testUser, clusterID)
 
+	// Step 7b: the same forward path on a server that serves no OAuth2
+	// at all (HTTP_API_MCP_OAUTH2 = false), against this same schedd.
+	// That is the deployment the setting exists for, and the claim it
+	// makes -- forwarded tokens work exactly as they do with OAuth2 on
+	// -- is only proved by running the step above against it.
+	t.Log("Step 7b: Testing the forward path on a server with OAuth2 withdrawn...")
+	testMCPForwardOnlyServer(t, htcCfg, scheddAddr, tempDir, passwordsDir, trustDomain, testUser, clusterID)
+
 	// Step 8: A dynamically-registered client (RFC 7591) that requests
 	// offline_access must receive a refresh token. This is the end-to-end
 	// guard for the "claude.ai re-auths on every expiry" bug: the DCR
@@ -393,6 +402,82 @@ func testMCPForwardRawCondorToken(t *testing.T, client *http.Client, baseURL, pa
 	// of who authenticated.
 	testMCPOwnerScopedTool(t, client, baseURL, rawToken, clusterID)
 	t.Log("Owner-scoped tool worked over a forwarded raw IDTOKEN")
+}
+
+// testMCPForwardOnlyServer stands up a second server on the same schedd
+// with OAuth2 withdrawn, and drives the whole forwarded-token path over
+// it: a pool-signed IDTOKEN to /mcp/message, a query_jobs that reaches
+// the schedd, and an owner-scoped get_job that needs the actor the
+// schedd attributes the connection to.
+//
+// The shape of the deployment this is for, down to the details that
+// matter: no signing key (such a pod holds none -- it mints nothing, and
+// the IDTOKEN below is minted here standing in for the gateway), and no
+// web UI, so nothing else keeps the authorization server alive.
+//
+// The unit tests prove the branch is taken and builds a per-caller
+// security config. Only this proves the credential it builds actually
+// authenticates to a schedd, which is the one thing the setting promises
+// not to change.
+func testMCPForwardOnlyServer(t *testing.T, htcCfg *config.Config, scheddAddr, tempDir, passwordsDir, trustDomain, user string, clusterID int) {
+	listener, baseURL := listenLocal(t)
+	server, err := NewServer(Config{
+		ClientConfig:             htcCfg,
+		ListenAddr:               listener.Addr().String(),
+		ScheddName:               "local",
+		ScheddAddr:               scheddAddr,
+		UserHeader:               "X-Test-User",
+		UserHeaderTrustAnyUnsafe: true,
+		// No SigningKeyPath: this deployment mints nothing.
+		TrustDomain:       trustDomain,
+		UIDDomain:         trustDomain,
+		EnableMCP:         true,
+		MCPOAuth2Disabled: true,
+		OAuth2DBPath:      filepath.Join(tempDir, "forward-only.db"),
+	})
+	if err != nil {
+		t.Fatalf("failed to create the forward-only server: %v", err)
+	}
+	if server.oauth2Provider != nil {
+		t.Fatal("precondition: the OAuth2 provider was built anyway, so this is not the configuration under test")
+	}
+	go func() { _ = server.ServeListener(listener, "http") }()
+	if err := waitForServer(baseURL, 10*time.Second); err != nil {
+		t.Fatalf("the forward-only server failed to start: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// The whole point: identical to step 7, against a server with no
+	// authorization server behind it.
+	testMCPForwardRawCondorToken(t, client, baseURL, passwordsDir, trustDomain, user, clusterID)
+	t.Log("A forwarded IDTOKEN reached the schedd on a server serving no OAuth2")
+
+	// And none of the OAuth2 surface answers there.
+	for _, path := range []string{
+		"/.well-known/oauth-authorization-server",
+		"/.well-known/oauth-protected-resource/mcp",
+		"/oauth2/authorize",
+		"/oauth2/token",
+		"/oauth2/register",
+		"/mcp/oauth2/token",
+	} {
+		resp, err := client.Get(baseURL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s answered %d, want 404: %s", path, resp.StatusCode, string(body))
+		}
+	}
+	t.Log("No OAuth2 endpoint is served on the forward-only server")
 }
 
 // testMCPOwnerScopedTool calls get_job, which owner-scopes its query, and
