@@ -1846,3 +1846,55 @@ the scaling that follows -- `(int64_t)((val + fract) * mult + base-1) / base`
 undefined behaviour. The result is platform-dependent: `9007199254740991` on
 arm64, where the cast saturates, and the negative of that where it wraps. It
 is reachable and the fuzzer does report it, but there is nothing to match.
+
+## The container requirement went missing on an empty basename
+
+`container_image = mydir//` produced `TARGET.HasContainer` here and
+`TARGET.HasContainer && TARGET.HasSandboxImage` in condor_submit. The nightly
+found it as `ContAiner_imAge =00000000//`.
+
+Both sides agree on the ad: a trailing double slash has an empty basename, so
+`ContainerImage` is `""` and the path is kept in `ContainerImageFullPath`.
+They disagreed only about the requirement.
+
+`SetRequirements` asks `job->LookupString(ATTR_CONTAINER_IMAGE, image)`, which
+succeeds on an empty string, and `image_type_from_string("")` is neither
+`docker:` nor `.sif`, so it falls to the sandbox case like everything else.
+This parser asked whether the value was non-empty as well, and skipped the
+clause when it was not -- so the job would match an execute node with no
+runtime for that image kind.
+
+Measured against the oracle over every image spelling: `docker:`/`docker://`
+(any case), `.sif`/`.SIF`, a bare name, one trailing slash, two, three, a URL,
+and a padded value. All fifteen comparable spellings agree now, and
+`TestContainerImageRequirementClause` pins the clause for each kind.
+
+Note for anyone probing this by hand: an image naming a real directory
+(`container_image = /`) makes condor_submit size it by walking the tree, the
+same way it does for an executable, so a probe over `/` hangs the worker. The
+harness only guards the EXECUTABLE against that.
+
+## `$REAL(1,%A%Z)` is a macOS-oracle artifact, not a divergence
+
+Worth recording because a local fuzz run on macOS reports it within a minute
+and it looks real.
+
+On macOS libc an unknown printf conversion prints its character alone, so
+`snprintf("%A%Z", 1.0)` gives `0X1P+0Z`, `$REAL` appends `.0`, and the oracle
+returns `0X1P+0Z.0` where this parser returns `0X1P+0.0`.
+
+On glibc none of that happens. `Z` is a length modifier there (a deprecated
+synonym for `z`), so `%A%Z` ends inside a spec, `snprintf` returns **-1**, and
+`vformatstr_impl` (`stl_string_utils.cpp`) reaches `s.assign(fixbuf, n)` with
+`n == -1` -- its guard is `if (n < fixlen)`, which a negative length passes.
+`assign` takes a `size_type`, so that is `assign(buf, SIZE_MAX)` and glibc's
+`std::string` throws `length_error`. The harness treats a C++ exception as
+uncomparable and skips the input.
+
+So the two sides do not disagree on the platform the nightly and CI run on,
+and matching the macOS behaviour would BREAK parity there: `config/printf.go`
+is a port of glibc's spec parsing by design, and glibc's answer for `%A%ZZ` is
+`0X1P+0%Z` where macOS gives `0X1P+0ZZ`.
+
+Nothing changed here. The lesson is that the local macOS oracle is not
+authoritative for anything that reaches the C library's printf.

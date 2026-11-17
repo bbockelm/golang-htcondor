@@ -409,6 +409,58 @@ container_image = /cvmfs/x/images/foo.sif
 	}
 }
 
+// TestContainerImageRequirementClause pins the requirement clause
+// SetRequirements writes for each kind of container_image, which is
+// image_type_from_string's classification applied to the job ad rather than
+// to the string. Measured against the C++ oracle for every row.
+//
+// The empty row is the one the fuzzer found. `container_image = mydir//` has
+// an empty basename, so both condor_submit and this parser store
+// ContainerImage as the empty string and keep the path in
+// ContainerImageFullPath. SetRequirements asks job->LookupString, which
+// succeeds on an empty string, so the job still requires the capability --
+// "" is neither docker: nor .sif, so it classifies as a sandbox image like
+// anything else. Testing for a non-empty value here dropped the clause and
+// let the job match a node with no container runtime for that kind of image.
+func TestContainerImageRequirementClause(t *testing.T) {
+	cases := []struct {
+		image, want string
+		empty       bool
+	}{
+		{image: "docker://quay.io/x:latest", want: "TARGET.HasDockerURL"},
+		{image: "docker:x", want: "TARGET.HasDockerURL"},
+		{image: "/pool/images/foo.sif", want: "TARGET.HasSIF"},
+		{image: "just-a-name", want: "TARGET.HasSandboxImage"},
+		{image: "mydir/", want: "TARGET.HasSandboxImage"},
+		{image: "mydir//", want: "TARGET.HasSandboxImage", empty: true},
+		{image: "mydir///", want: "TARGET.HasSandboxImage", empty: true},
+		{image: "00000000//", want: "TARGET.HasSandboxImage", empty: true},
+	}
+	others := []string{"TARGET.HasDockerURL", "TARGET.HasSIF", "TARGET.HasSandboxImage"}
+	for _, c := range cases {
+		ad := adFromSubmit(t, "universe = container\nexecutable = /bin/echo\ncontainer_image = "+c.image+"\n")
+		if c.empty {
+			// lookupStr gives the unparsed value, so an empty string
+			// reads back as a pair of quotes.
+			if got := lookupStr(t, ad, "ContainerImage"); got != `""` {
+				t.Fatalf("%q: ContainerImage = %s, want an empty string -- that is what this row is about", c.image, got)
+			}
+		}
+		req := lookupStr(t, ad, "Requirements")
+		if !strings.Contains(req, "TARGET.HasContainer") {
+			t.Errorf("%q: Requirements = %q, want it to name TARGET.HasContainer", c.image, req)
+		}
+		if !strings.Contains(req, c.want) {
+			t.Errorf("%q: Requirements = %q, want it to name %s", c.image, req, c.want)
+		}
+		for _, o := range others {
+			if o != c.want && strings.Contains(req, o) {
+				t.Errorf("%q: Requirements names %s as well as %s", c.image, o, c.want)
+			}
+		}
+	}
+}
+
 func TestJobStatusControl(t *testing.T) {
 	submit := `
 universe = vanilla

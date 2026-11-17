@@ -252,7 +252,15 @@ func (sf *SubmitFile) addPlatformRequirements(ad *classad.ClassAd, refs map[stri
 		add("TARGET.HasContainer")
 		if _, ok := ad.Lookup("DockerImage"); ok {
 			add("TARGET.HasDockerURL")
-		} else if img, ok := ad.EvaluateAttrString("ContainerImage"); ok && img != "" {
+		} else if img, ok := ad.EvaluateAttrString("ContainerImage"); ok {
+			// Whether the attribute is THERE, not whether it has a value.
+			// SetRequirements asks job->LookupString, which succeeds on an
+			// empty string, and image_type_from_string then classifies ""
+			// as a sandbox image like anything else that is neither
+			// docker: nor .sif. `container_image = mydir//` reaches this:
+			// both sides store ContainerImage as the basename, which for a
+			// trailing double slash is empty, and the job still requires
+			// TARGET.HasSandboxImage.
 			add(containerImageRequirement(img))
 		}
 	default:
