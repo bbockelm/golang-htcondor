@@ -2781,6 +2781,55 @@ const (
 	unitMiB = int64(1024) * 1024
 )
 
+// readSizeNumber reads the number off the front of a size value the way
+// parse_int64_bytes does, returning its integer and fractional parts and how
+// far it got.
+//
+// The integer part is read as strtol reads it: a sign counts only when digits
+// follow it, so strtol consumes nothing at all from "+" or from "-.5" and
+// leaves the cursor where it started.
+//
+// Whether anything parsed is then asked AFTER the fractional part rather than
+// before it. So a value with no integer digits is still a number as long as
+// it has a dot -- `request_disk = .5M` is 512 KiB and `.000` is 0 -- while a
+// value starting with neither a digit nor a dot is not a size at all. A sign
+// is not enough either, which is why `-.5` is an expression on both sides
+// although `.5` is a size.
+func readSizeNumber(p string) (val int64, frac float64, next int, ok bool) {
+	j := 0
+	if j < len(p) && (p[j] == '+' || p[j] == '-') {
+		j++
+	}
+	digits := j
+	for j < len(p) && p[j] >= '0' && p[j] <= '9' {
+		j++
+	}
+	if j > digits {
+		n, err := strconv.ParseInt(p[:j], 10, 64)
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		val, next = n, j
+	}
+
+	// HTCondor keeps three fractional digits and ignores the rest, since
+	// the result is rounded up to the base anyway.
+	if next < len(p) && p[next] == '.' {
+		next++
+		for scale := 10.0; next < len(p) && p[next] >= '0' && p[next] <= '9'; next++ {
+			if scale <= 1000.0 {
+				frac += float64(p[next]-'0') / scale
+				scale *= 10
+			}
+		}
+	}
+
+	if next == 0 {
+		return 0, 0, 0, false
+	}
+	return val, frac, next, true
+}
+
 // parseSizeWithUnits parses a size-valued submit command (request_memory,
 // request_disk, image_size, ...) into the attribute's own base unit,
 // mirroring HTCondor's parse_int64_bytes() (condor_utils/metric_units.cpp).
@@ -2801,34 +2850,9 @@ const (
 func parseSizeWithUnits(s string, base int64) (int64, bool) {
 	p := strings.TrimLeft(s, " \t")
 
-	// Integer part.
-	i := 0
-	if i < len(p) && (p[i] == '+' || p[i] == '-') {
-		i++
-	}
-	digits := i
-	for i < len(p) && p[i] >= '0' && p[i] <= '9' {
-		i++
-	}
-	if i == digits {
+	val, frac, i, ok := readSizeNumber(p)
+	if !ok {
 		return 0, false
-	}
-	val, err := strconv.ParseInt(p[:i], 10, 64)
-	if err != nil {
-		return 0, false
-	}
-
-	// Optional fractional part; HTCondor keeps three digits and ignores
-	// the rest, since the result is rounded up to the base anyway.
-	frac := 0.0
-	if i < len(p) && p[i] == '.' {
-		i++
-		for scale := 10.0; i < len(p) && p[i] >= '0' && p[i] <= '9'; i++ {
-			if scale <= 1000.0 {
-				frac += float64(p[i]-'0') / scale
-				scale *= 10
-			}
-		}
 	}
 
 	for i < len(p) && (p[i] == ' ' || p[i] == '\t') {
