@@ -160,10 +160,18 @@ func TestOAuth2IsServedWithTheWebUIOrMCP(t *testing.T) {
 				}
 				for _, scope := range []string{
 					"openid", "profile", "email", "offline_access",
-					"mcp:admin", "mcp:superuser", "condor:/READ", "condor:/WRITE",
+					scopeAnyUserRead, scopeAnyUserWrite, "condor:/READ", "condor:/WRITE",
 				} {
 					if !slices.Contains(scopes, scope) {
 						t.Errorf("scopes_supported lacks %s (%v)", scope, scopes)
+					}
+				}
+				// A superseded spelling is never advertised. A client asks
+				// for every scope here, so advertising both spellings is
+				// what put one power on the consent page twice.
+				for _, scope := range oauth2SupersededScopes {
+					if slices.Contains(scopes, scope) {
+						t.Errorf("scopes_supported offers the superseded %s (%v)", scope, scopes)
 					}
 				}
 			})

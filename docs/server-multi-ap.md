@@ -198,7 +198,7 @@ single-AP mode, and one that does not parse is a 400 before anything is
 contacted.
 
 **Administrators** are scoped per access point: this server's own grant
-(admin group, `mcp:admin`, `mcp:superuser`, `MCP_ADMIN_USERS`) is
+(admin group, `anyuser:read`, `anyuser:write`, `MCP_ADMIN_USERS`) is
 necessary, and the caller must also be in that access point's
 `QUEUE_SUPER_USERS`, read from it. A queue superuser on ap1 reads and acts
 on other users' jobs there and nowhere else. Hub reads have no admin view.

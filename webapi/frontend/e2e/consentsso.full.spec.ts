@@ -18,9 +18,9 @@ import { serverLog } from "./fixtures/serverlog";
 // drive itself through the IDP and still stop at consent.
 //
 // The privileged-scope assertions are repeated rather than assumed,
-// because skipping consent skipped them too: mcp:admin and mcp:superuser
-// were granted on group membership alone, with no unchecked box and no
-// act by anyone.
+// because skipping consent skipped them too: the cross-user scopes were
+// granted on group membership alone, with no unchecked box and no act by
+// anyone.
 
 const log = serverLog();
 const adminPw = adminPassword(log);
@@ -29,8 +29,8 @@ const REQUESTED = [
   "openid",
   "offline_access",
   "mcp:read",
-  "mcp:admin",
-  "mcp:superuser",
+  "anyuser:read",
+  "anyuser:write",
 ];
 const REDIRECT_URI = "http://127.0.0.1:39533/callback";
 
@@ -131,7 +131,7 @@ test("privileged scopes are still withheld by default on the SSO path", async ({
     "expected the consent page",
   ).toHaveCount(1);
 
-  for (const scope of ["mcp:admin", "mcp:superuser"]) {
+  for (const scope of ["anyuser:read", "anyuser:write"]) {
     const box = page.locator(
       `input[type="checkbox"][name="scope"][value="${scope}"]`,
     );
@@ -177,12 +177,12 @@ test("privileged scopes are still withheld by default on the SSO path", async ({
   // This is what the old path handed over without asking.
   expect(
     granted,
-    "the SSO path granted mcp:admin without it being ticked",
-  ).not.toContain("mcp:admin");
+    "the SSO path granted anyuser:read without it being ticked",
+  ).not.toContain("anyuser:read");
   expect(
     granted,
-    "the SSO path granted mcp:superuser without it being ticked",
-  ).not.toContain("mcp:superuser");
+    "the SSO path granted anyuser:write without it being ticked",
+  ).not.toContain("anyuser:write");
   expect(granted, "an ordinary requested scope was dropped").toContain(
     "mcp:read",
   );

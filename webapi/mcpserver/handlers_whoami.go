@@ -176,11 +176,17 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 // than UID_DOMAIN, say -- never matches, and the result is
 // indistinguishable from not being listed at all.
 func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVia, superVia string) {
-	// Either spelling grants the tier, so report whichever the token
-	// actually carries rather than the one this code happens to test
-	// first: an operator comparing whoami against their consent page
-	// needs to see the scope they granted.
-	readScopes := scopeMCPAdmin + " or " + ScopeAnyUserRead
+	// What a token carries and what to go and get are different
+	// questions, and they no longer have the same answer. Either
+	// spelling grants the tier, so a holder is told whichever one they
+	// hold -- an operator comparing whoami against their consent page
+	// needs to see the scope they granted. But nobody can be granted
+	// the mcp: spelling any more: it is neither advertised nor offered,
+	// and each power appears on the consent page once, under its
+	// anyuser: name. So every remedy below names the obtainable one,
+	// and the absence is stated as the tier rather than as a list of
+	// spellings to go hunting for.
+	const missingRead = "no cross-user read scope"
 	switch {
 	case actor == "":
 		return "not authenticated", "not authenticated"
@@ -198,15 +204,15 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 			// happened and what to do, because the alternative is an
 			// operator concluding the list is broken: it worked until
 			// the list stopped overriding a scope-bearing token.
-			adminVia = fmt.Sprintf("no %s scope; %q is in MCP_ADMIN_USERS, but that list only "+
+			adminVia = fmt.Sprintf("%s; %q is in MCP_ADMIN_USERS, but that list only "+
 				"applies where the transport supplies no scopes (stdio). Re-authorize and grant "+
-				"one of them -- entitlement comes from HTTP_API_MCP_ADMIN_GROUP",
-				readScopes, actor)
+				"%s -- entitlement comes from HTTP_API_MCP_ADMIN_GROUP",
+				missingRead, actor, ScopeAnyUserRead)
 		case len(s.adminUsers) > 0:
-			adminVia = fmt.Sprintf("no %s scope, and %q is not in the %d-entry MCP_ADMIN_USERS list",
-				readScopes, actor, len(s.adminUsers))
+			adminVia = fmt.Sprintf("%s (grant %s), and %q is not in the %d-entry MCP_ADMIN_USERS list",
+				missingRead, ScopeAnyUserRead, actor, len(s.adminUsers))
 		default:
-			adminVia = "no " + readScopes + " scope, and MCP_ADMIN_USERS is unset"
+			adminVia = missingRead + " (grant " + ScopeAnyUserRead + "), and MCP_ADMIN_USERS is unset"
 		}
 	}
 
@@ -216,8 +222,8 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 	case hasScope(ctx, ScopeAnyUserWrite):
 		superVia = "granted by the " + ScopeAnyUserWrite + " scope"
 	default:
-		superVia = "no " + scopeMCPSuperuser + " or " + ScopeAnyUserWrite +
-			" scope (MCP_ADMIN_USERS does not grant either)"
+		superVia = "no cross-user write scope (grant " + ScopeAnyUserWrite +
+			"; MCP_ADMIN_USERS does not grant it)"
 	}
 	return adminVia, superVia
 }
