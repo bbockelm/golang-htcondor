@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
 )
 
 // What an API key may do beyond its creator's own jobs, and how long
@@ -74,7 +75,11 @@ import (
 // so settling on a different one is a single edit, and it is safe to
 // rename until the first release that ships it because no grant
 // carrying it exists yet.
-const scopeAnyUserRead = "anyuser:read"
+//
+// The declaration lives in mcpserver so that the two surfaces honouring
+// this scope cannot spell it differently; "a single edit" only holds
+// while there is one string to edit.
+const scopeAnyUserRead = mcpserver.ScopeAnyUserRead
 
 // scopeAnyUserWrite is the entitlement to act on every user's jobs on this
 // access point:
@@ -83,8 +88,9 @@ const scopeAnyUserRead = "anyuser:read"
 // across users needs both, the same way condor:/READ and condor:/WRITE
 // are selected separately.
 //
-// PROVISIONAL NAME, on the same terms as scopeAnyUserRead.
-const scopeAnyUserWrite = "anyuser:write"
+// PROVISIONAL NAME, on the same terms as scopeAnyUserRead, and declared
+// in the same place for the same reason.
+const scopeAnyUserWrite = mcpserver.ScopeAnyUserWrite
 
 // entitlementScopes are the scopes this file governs: the ones that
 // are claims about a person rather than about a key, and so are

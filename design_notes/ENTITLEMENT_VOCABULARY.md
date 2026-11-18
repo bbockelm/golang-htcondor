@@ -10,6 +10,7 @@ line between them is drawn here rather than left to be inferred:
 | --- | --- |
 | `anyuser:read` and `anyuser:write` exist, mintable on an API key and grantable through OAuth2 | every rename below |
 | Both are advertised, consent-unchecked, and gated on the groups their older spellings answer to | the `*_GROUPS` / `*_USERS` scheme |
+| Both are honoured on REST and MCP alike, and named by `whoami` | |
 | Entitlements are granted at mint and re-verified on use (service keys) | splitting `HTTP_API_WEBUI_ADMIN_GROUP` |
 | `MCP_ADMIN_USERS` keeps its behaviour | deprecating it in earnest |
 | | both MCP scope-challenge fixes |

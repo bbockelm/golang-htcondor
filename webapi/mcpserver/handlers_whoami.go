@@ -176,11 +176,18 @@ func (s *Server) toolWhoami(ctx context.Context, _ map[string]interface{}) (inte
 // than UID_DOMAIN, say -- never matches, and the result is
 // indistinguishable from not being listed at all.
 func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVia, superVia string) {
+	// Either spelling grants the tier, so report whichever the token
+	// actually carries rather than the one this code happens to test
+	// first: an operator comparing whoami against their consent page
+	// needs to see the scope they granted.
+	readScopes := scopeMCPAdmin + " or " + ScopeAnyUserRead
 	switch {
 	case actor == "":
 		return "not authenticated", "not authenticated"
 	case hasScope(ctx, scopeMCPAdmin):
 		adminVia = "granted by the " + scopeMCPAdmin + " scope"
+	case hasScope(ctx, ScopeAnyUserRead):
+		adminVia = "granted by the " + ScopeAnyUserRead + " scope"
 	default:
 		listed := s.isAdminUser(actor)
 		switch {
@@ -193,20 +200,24 @@ func (s *Server) privilegeProvenance(ctx context.Context, actor string) (adminVi
 			// the list stopped overriding a scope-bearing token.
 			adminVia = fmt.Sprintf("no %s scope; %q is in MCP_ADMIN_USERS, but that list only "+
 				"applies where the transport supplies no scopes (stdio). Re-authorize and grant "+
-				"%s -- entitlement comes from HTTP_API_MCP_ADMIN_GROUP",
-				scopeMCPAdmin, actor, scopeMCPAdmin)
+				"one of them -- entitlement comes from HTTP_API_MCP_ADMIN_GROUP",
+				readScopes, actor)
 		case len(s.adminUsers) > 0:
 			adminVia = fmt.Sprintf("no %s scope, and %q is not in the %d-entry MCP_ADMIN_USERS list",
-				scopeMCPAdmin, actor, len(s.adminUsers))
+				readScopes, actor, len(s.adminUsers))
 		default:
-			adminVia = "no " + scopeMCPAdmin + " scope, and MCP_ADMIN_USERS is unset"
+			adminVia = "no " + readScopes + " scope, and MCP_ADMIN_USERS is unset"
 		}
 	}
 
-	if hasScope(ctx, scopeMCPSuperuser) {
+	switch {
+	case hasScope(ctx, scopeMCPSuperuser):
 		superVia = "granted by the " + scopeMCPSuperuser + " scope"
-	} else {
-		superVia = "no " + scopeMCPSuperuser + " scope (MCP_ADMIN_USERS does not grant it)"
+	case hasScope(ctx, ScopeAnyUserWrite):
+		superVia = "granted by the " + ScopeAnyUserWrite + " scope"
+	default:
+		superVia = "no " + scopeMCPSuperuser + " or " + ScopeAnyUserWrite +
+			" scope (MCP_ADMIN_USERS does not grant either)"
 	}
 	return adminVia, superVia
 }
