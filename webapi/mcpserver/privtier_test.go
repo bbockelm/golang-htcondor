@@ -235,10 +235,14 @@ func TestWhoamiExplainsWhyTheListDidNotApply(t *testing.T) {
 	if s.allowsAllUsers(ctx, "root@uid.domain", tierRead) {
 		t.Fatal("precondition: this caller should not be admin")
 	}
-	for _, want := range []string{scopeMCPAdmin, "MCP_ADMIN_USERS", "HTTP_API_MCP_ADMIN_GROUP"} {
+	for _, want := range []string{ScopeAnyUserRead, "MCP_ADMIN_USERS", "HTTP_API_MCP_ADMIN_GROUP"} {
 		if !strings.Contains(adminVia, want) {
 			t.Errorf("admin_via = %q; it should mention %q so the operator knows what to do", adminVia, want)
 		}
+	}
+	// And the scope it names has to be one they can actually be granted.
+	if strings.Contains(adminVia, scopeMCPAdmin) {
+		t.Errorf("admin_via = %q; %q is neither advertised nor offered", adminVia, scopeMCPAdmin)
 	}
 }
 
@@ -294,18 +298,23 @@ func TestWhoamiNamesTheScopeThatGrantedTheTier(t *testing.T) {
 		t.Errorf("superuser_via should name anyuser:write; got %q", superVia)
 	}
 
-	// And a caller holding neither must be told about both spellings,
-	// not just the one this code happens to test first.
+	// And a caller holding neither is told what to go and get, which is
+	// the obtainable spelling and only that one. The mcp: spelling is
+	// neither advertised nor offered, so naming it sends an operator
+	// after a scope no consent page will show them.
 	adminVia, superVia = s.privilegeProvenance(tierCtx("hank@uid.domain", "mcp:read"), "hank@uid.domain")
-	for _, want := range []string{scopeMCPAdmin, ScopeAnyUserRead} {
-		if !strings.Contains(adminVia, want) {
-			t.Errorf("admin_via should name %q as a way to get the tier; got %q", want, adminVia)
-		}
+	if !strings.Contains(adminVia, ScopeAnyUserRead) {
+		t.Errorf("admin_via should name %q as the way to get the tier; got %q", ScopeAnyUserRead, adminVia)
 	}
-	for _, want := range []string{scopeMCPSuperuser, ScopeAnyUserWrite} {
-		if !strings.Contains(superVia, want) {
-			t.Errorf("superuser_via should name %q as a way to get the tier; got %q", want, superVia)
-		}
+	if strings.Contains(adminVia, scopeMCPAdmin) {
+		t.Errorf("admin_via names the unobtainable %q; got %q", scopeMCPAdmin, adminVia)
+	}
+	if !strings.Contains(superVia, ScopeAnyUserWrite) {
+		t.Errorf("superuser_via should name %q as the way to get the tier; got %q",
+			ScopeAnyUserWrite, superVia)
+	}
+	if strings.Contains(superVia, scopeMCPSuperuser) {
+		t.Errorf("superuser_via names the unobtainable %q; got %q", scopeMCPSuperuser, superVia)
 	}
 }
 

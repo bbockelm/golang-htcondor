@@ -2226,7 +2226,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if len(cfg.MCPAdminUsers) > 0 && !h.mcpAdminGroups.configured() {
 		logger.Warn(logging.DestinationHTTP,
 			"MCP_ADMIN_USERS applies only to callers whose transport supplies no scopes (stdio). "+
-				"OAuth callers need the mcp:admin scope, whose entitlement comes from "+
+				"OAuth callers need the anyuser:read scope, whose entitlement comes from "+
 				"HTTP_API_MCP_ADMIN_GROUP -- which is unset, so no OAuth caller can be granted it",
 			"admin_users", len(cfg.MCPAdminUsers))
 	}
