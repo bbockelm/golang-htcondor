@@ -117,8 +117,10 @@ func TestPrivilegedTagSharesTheNameLine(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("no .scope-head wrapping the name and its tag:\n%s", page)
 	}
-	head := page[i:]
-	head = head[:strings.Index(head, "</span></span>")]
+	head, _, closed := strings.Cut(page[i:], "</span></span>")
+	if !closed {
+		t.Fatalf("the .scope-head span is never closed:\n%s", page)
+	}
 	if !strings.Contains(head, "<strong>"+scopeAnyUserRead+"</strong>") {
 		t.Errorf(".scope-head does not hold the scope name: %s", head)
 	}
