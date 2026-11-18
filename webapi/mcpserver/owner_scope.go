@@ -238,10 +238,12 @@ type privTier int
 
 const (
 	// tierRead covers queries: seeing other users' jobs, history and
-	// epochs. Granted by the mcp:admin scope or by MCP_ADMIN_USERS.
+	// epochs. Granted by the mcp:admin or anyuser:read scope, or by
+	// MCP_ADMIN_USERS.
 	tierRead privTier = iota
 	// tierMutate covers acting on another user's jobs -- removal, hold,
-	// release, edit. Granted ONLY by the mcp:superuser scope.
+	// release, edit. Granted ONLY by a scope, mcp:superuser or
+	// anyuser:write; no user list reaches this tier.
 	tierMutate
 )
 
@@ -256,9 +258,30 @@ func (t privTier) String() string {
 // operator's group configuration, the same path mcp:read and mcp:write
 // already take, so a privilege rides in the token and is visible to
 // whoami rather than being re-derived per call.
+//
+// Each tier has two spellings, and they are equals rather than one
+// being a fallback for the other: the anyuser: pair names the power
+// rather than the surface that first needed it. A scope that names a
+// power has to mean the same thing wherever it is presented, which is
+// why MCP honours it as REST already does.
 const (
 	scopeMCPAdmin     = "mcp:admin"
 	scopeMCPSuperuser = "mcp:superuser"
+
+	// ScopeAnyUserRead is the read tier: every user's jobs on this
+	// access point. ScopeAnyUserWrite is the mutate tier, and is not a
+	// superset of the read one -- a caller expected to both see and act
+	// across users needs both, exactly as condor:/READ and
+	// condor:/WRITE are selected separately.
+	//
+	// Exported because httpserver spells the same two scopes and would
+	// otherwise keep a second copy of the strings. One declaration is
+	// what lets the provisional names in design_notes be settled in a
+	// single edit, and what stops the two surfaces drifting apart
+	// again. httpserver imports mcpserver, never the reverse, so this
+	// is the only direction the constants can be shared.
+	ScopeAnyUserRead  = "anyuser:read"
+	ScopeAnyUserWrite = "anyuser:write"
 )
 
 // allowsAllUsers reports whether this caller may act outside their own
@@ -298,9 +321,9 @@ func (s *Server) allowsAllUsers(ctx context.Context, authenticatedUser string, t
 func (s *Server) allowsAllUsersByPolicy(ctx context.Context, authenticatedUser string, tier privTier) bool {
 	switch tier {
 	case tierMutate:
-		return hasScope(ctx, scopeMCPSuperuser)
+		return hasScope(ctx, scopeMCPSuperuser) || hasScope(ctx, ScopeAnyUserWrite)
 	default:
-		if hasScope(ctx, scopeMCPAdmin) {
+		if hasScope(ctx, scopeMCPAdmin) || hasScope(ctx, ScopeAnyUserRead) {
 			return true
 		}
 		// The list does not override a token that withheld the scope.

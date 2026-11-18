@@ -241,3 +241,83 @@ func TestWhoamiExplainsWhyTheListDidNotApply(t *testing.T) {
 		}
 	}
 }
+
+// The anyuser: pair is the same two powers named for what they grant
+// rather than for the surface that first needed them, and REST has
+// honoured them since they were introduced (seesAllJobsByPolicy). MCP
+// honouring only the mcp: spelling made the same granted scope mean
+// different things on the two surfaces: a token carrying anyuser:read
+// read every user's jobs over REST and was silently confined to its
+// own over /mcp, with whoami reporting admin=false and naming a scope
+// the operator had not been offered.
+func TestAnyUserReadGrantsReadOnly(t *testing.T) {
+	s := tierServer() // not in MCP_ADMIN_USERS at all
+	ctx := tierCtx("erin@uid.domain", "mcp:read", ScopeAnyUserRead)
+
+	if got, ok := okScope(s.scopeToOwner(ctx, "true", tierRead)); !ok || got != "true" {
+		t.Errorf("anyuser:read should be unconfined for reads: got %q ok=%v", got, ok)
+	}
+	got, _ := okScope(s.scopeToOwner(ctx, "true", tierMutate))
+	if !strings.Contains(got, `Owner == "erin"`) {
+		t.Errorf("anyuser:read must not grant mutation; got %q", got)
+	}
+}
+
+// anyuser:write carries the mutate tier and carries it alone, exactly
+// as mcp:superuser does not imply mcp:admin. Seeing every user's jobs
+// and acting on them are separate grants on both spellings.
+func TestAnyUserWriteGrantsMutationOnly(t *testing.T) {
+	s := tierServer()
+	ctx := tierCtx("frank@uid.domain", "mcp:read", "mcp:write", ScopeAnyUserWrite)
+
+	if got, ok := okScope(s.scopeToOwner(ctx, "JobStatus == 5", tierMutate)); !ok || got != "JobStatus == 5" {
+		t.Errorf("anyuser:write should be unconfined for mutation: got %q ok=%v", got, ok)
+	}
+	got, _ := okScope(s.scopeToOwner(ctx, "true", tierRead))
+	if !strings.Contains(got, `Owner == "frank"`) {
+		t.Errorf("anyuser:write must not grant the read tier; got %q", got)
+	}
+}
+
+// whoami has to name the scope the caller actually holds. Reporting the
+// mcp: spelling to someone who was granted the anyuser: one sends an
+// operator to look for a scope their consent page never offered.
+func TestWhoamiNamesTheScopeThatGrantedTheTier(t *testing.T) {
+	s := tierServer()
+
+	adminVia, superVia := s.privilegeProvenance(
+		tierCtx("gail@uid.domain", ScopeAnyUserRead, ScopeAnyUserWrite), "gail@uid.domain")
+	if !strings.Contains(adminVia, ScopeAnyUserRead) {
+		t.Errorf("admin_via should name anyuser:read; got %q", adminVia)
+	}
+	if !strings.Contains(superVia, ScopeAnyUserWrite) {
+		t.Errorf("superuser_via should name anyuser:write; got %q", superVia)
+	}
+
+	// And a caller holding neither must be told about both spellings,
+	// not just the one this code happens to test first.
+	adminVia, superVia = s.privilegeProvenance(tierCtx("hank@uid.domain", "mcp:read"), "hank@uid.domain")
+	for _, want := range []string{scopeMCPAdmin, ScopeAnyUserRead} {
+		if !strings.Contains(adminVia, want) {
+			t.Errorf("admin_via should name %q as a way to get the tier; got %q", want, adminVia)
+		}
+	}
+	for _, want := range []string{scopeMCPSuperuser, ScopeAnyUserWrite} {
+		if !strings.Contains(superVia, want) {
+			t.Errorf("superuser_via should name %q as a way to get the tier; got %q", want, superVia)
+		}
+	}
+}
+
+// The spellings are public API: they appear in consent pages, in stored
+// granted_scopes rows and in operators' client registrations. httpserver
+// takes its copy from these constants, so pinning the literals here is
+// what makes that sharing load-bearing rather than decorative.
+func TestAnyUserScopeSpellings(t *testing.T) {
+	if ScopeAnyUserRead != "anyuser:read" {
+		t.Errorf("ScopeAnyUserRead = %q, want anyuser:read", ScopeAnyUserRead)
+	}
+	if ScopeAnyUserWrite != "anyuser:write" {
+		t.Errorf("ScopeAnyUserWrite = %q, want anyuser:write", ScopeAnyUserWrite)
+	}
+}
