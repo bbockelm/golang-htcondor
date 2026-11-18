@@ -70,7 +70,7 @@ func (i Incarnation) sameAs(o Incarnation) bool {
 		i.Revision == o.Revision &&
 		i.Home == o.Home &&
 		i.Origin == o.Origin &&
-		strings.Join(i.Groups, ",") == strings.Join(o.Groups, ",")
+		FormatGroupList(i.Groups) == FormatGroupList(o.Groups)
 }
 
 // Recorder keeps the record of what was served.
@@ -132,7 +132,7 @@ func (r *SQLRecorder) Observe(ctx context.Context, at time.Time, apps []Incarnat
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			app.AppID, app.Digest, app.BundleKind, app.SizeBytes, boolToInt(app.DigestKnown),
 			app.Version, app.Revision, app.Name, app.Description, app.Icon,
-			strings.Join(app.Groups, ","), boolToInt(app.Home), app.Origin, now, now,
+			FormatGroupList(app.Groups), boolToInt(app.Home), app.Origin, now, now,
 		); err != nil {
 			return fmt.Errorf("site app audit: record %q: %w", app.AppID, err)
 		}

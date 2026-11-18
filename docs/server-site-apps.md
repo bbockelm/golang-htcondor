@@ -68,7 +68,7 @@ named after it, upper-cased:
 
 | Parameter | Meaning |
 | --- | --- |
-| `HTTP_API_SITE_APP_<ID>_GROUPS` | Required. Comma-separated groups that may see the app. `*` means every authenticated user. Nothing is published without it, and an empty value publishes nothing rather than publishing to nobody. |
+| `HTTP_API_SITE_APP_<ID>_GROUPS` | Required. Comma-separated groups that may see the app, or a JSON array of names (`["Lab, Smith"]`) for names holding a comma. `*` means every authenticated user. Nothing is published without it, and an empty value publishes nothing rather than publishing to nobody. |
 | `HTTP_API_SITE_APP_<ID>_HOME` | Members of an app-only group land here instead of the dashboard. See [App-only sessions](#app-only-sessions). |
 | `HTTP_API_SITE_APP_<ID>_ENABLED` | `false` withdraws the app without deleting it. Absent means enabled. |
 | `HTTP_API_SITE_APP_<ID>_NAME` | Override what the bundle calls itself. |

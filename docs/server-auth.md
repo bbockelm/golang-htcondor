@@ -375,6 +375,31 @@ Matching is case-insensitive.
 further, and take lists on the same terms. The write group also decides
 `condor:/WRITE`: a user it denies `mcp:write` is denied that too.
 
+### Names the comma rule cannot spell
+
+A name may contain **spaces**, which directory-sourced names often do.
+Write it as it is, with no quoting -- HTCondor keeps quotation marks as
+part of a value, so quoting it creates a group nobody is in:
+
+```
+HTTP_API_MCP_ACCESS_GROUP = CO:COU:CMS Connect COU:members:active
+```
+
+A value that begins with `[` is read as a **JSON array of strings**
+instead, which is how to name a group whose own name contains a comma,
+or one that begins or ends with a space:
+
+```
+HTTP_API_MCP_ACCESS_GROUP = ["CO:COU:CMS Connect COU:members:active", "Lab, Smith"]
+```
+
+Names inside the array are taken verbatim -- nothing is trimmed -- and
+an empty array means what an empty value means: no group required. A
+value that opens with `[` but is not a valid JSON array falls back to
+the comma rule, where it yields names that match nobody; it never reads
+as "no group required". The same form is accepted wherever this server
+reads a group list, including `HTTP_API_SITE_APP_<ID>_GROUPS`.
+
 Web interface access and MCP access are **separate**. They were one knob,
 so granting somebody the browser necessarily granted them MCP; a site can
 now let its staff open the pages without also letting them drive the AP
