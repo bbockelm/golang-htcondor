@@ -17,6 +17,8 @@ package httpserver
 import (
 	"strings"
 	"sync/atomic"
+
+	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
 )
 
 // groupSet is an authorization group list that a reconfigure can replace
@@ -33,25 +35,13 @@ type groupSet struct {
 
 // parseGroupList splits a configured group list.
 //
-// Commas separate; surrounding whitespace is trimmed, because a list
-// written to be read by a human ("chtc_staff, chtc_admin") should mean
-// what it looks like. Empty entries are dropped, so a trailing comma is
-// not a group named "".
+// Commas separate, surrounding whitespace is trimmed, and a value
+// beginning with "[" is a JSON array of strings -- the form that can
+// spell a directory group name holding a comma. The rule itself lives
+// in siteapps.ParseGroupList so that the gates in this package and the
+// site-app policies cannot come to read a list differently.
 func parseGroupList(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	groups := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			groups = append(groups, p)
-		}
-	}
-	if len(groups) == 0 {
-		return nil
-	}
-	return groups
+	return siteapps.ParseGroupList(raw)
 }
 
 // newGroupSet builds a set from a configured list.

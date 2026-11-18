@@ -15,6 +15,7 @@
 package siteapps
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -95,12 +96,36 @@ func (p Policy) IsEnabled() bool { return p.Enabled == nil || *p.Enabled }
 // what it looks like. Empty entries are dropped, so a trailing comma is
 // not a group named "".
 //
+// A value beginning with "[" is read as a JSON array of strings
+// instead:
+//
+//	["CO:COU:CMS Connect COU:members:active", "wheel"]
+//
+// Directory-sourced names routinely hold characters the comma rule
+// cannot spell -- a comma above all, but also leading or trailing
+// space that is part of the name. JSON is the one quoting scheme an
+// operator, a web form and a database column can all produce without
+// this server inventing an escape of its own. Names inside the array
+// are taken verbatim: nothing is trimmed, because a name spelled with
+// a space on the end is spelled that way on purpose. Empty strings are
+// still dropped. An empty array means what an empty value means --
+// no group named -- and not "nobody".
+//
+// A "[" value that is NOT a JSON array of strings falls back to the
+// comma rule rather than parsing as nothing. These lists decide who may
+// act, and an empty one means "no group required" at several of the
+// gates that read it: falling back yields names that match nobody,
+// which refuses, where returning nil would open the gate.
+//
 // This is the rule every other configured group list in this server
 // follows; httpserver.parseGroupList calls through to it so there is
 // one implementation rather than two that can drift.
 func ParseGroupList(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
+	}
+	if groups, ok := parseJSONGroupList(raw); ok {
+		return groups
 	}
 	parts := strings.Split(raw, ",")
 	groups := make([]string, 0, len(parts))
@@ -113,6 +138,72 @@ func ParseGroupList(raw string) []string {
 		return nil
 	}
 	return groups
+}
+
+// parseJSONGroupList reads the JSON-array form of a group list, and
+// reports whether the value was one.
+//
+// False means "not a JSON array of strings" -- either it does not begin
+// with "[", or it does not parse -- and ParseGroupList then applies the
+// comma rule to it.
+func parseJSONGroupList(raw string) ([]string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, false
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(trimmed), &names); err != nil {
+		return nil, false
+	}
+	groups := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != "" {
+			groups = append(groups, n)
+		}
+	}
+	if len(groups) == 0 {
+		return nil, true
+	}
+	return groups, true
+}
+
+// FormatGroupList renders a list as a string ParseGroupList reads back
+// unchanged. The inverse of ParseGroupList, for the columns and form
+// fields that store one of these lists as a single value.
+//
+// Comma-separated while that round-trips, so rows written before the
+// JSON form existed keep their spelling and a human still recognizes
+// what is in the column; JSON exactly when the comma rule would lose
+// something -- a name holding a comma, a name whose own spelling has
+// space at either end, or a first name beginning with "[", which would
+// otherwise read back as a malformed JSON list.
+func FormatGroupList(groups []string) string {
+	names := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g != "" {
+			names = append(names, g)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	needJSON := strings.HasPrefix(strings.TrimSpace(names[0]), "[")
+	for _, n := range names {
+		if strings.ContainsRune(n, ',') || n != strings.TrimSpace(n) {
+			needJSON = true
+			break
+		}
+	}
+	if !needJSON {
+		return strings.Join(names, ",")
+	}
+	b, err := json.Marshal(names)
+	if err != nil {
+		// Unreachable for []string; a comma list is still the best
+		// answer available, and losing a name beats losing the row.
+		return strings.Join(names, ",")
+	}
+	return string(b)
 }
 
 // configPrefix is where an app's parameters live. An app "cryoem" is

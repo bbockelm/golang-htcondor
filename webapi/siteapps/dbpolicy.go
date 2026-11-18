@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -263,7 +262,7 @@ func (s *UploadStore) Put(ctx context.Context, u Upload) error {
 			digest=excluded.digest, size_bytes=excluded.size_bytes,
 			source_repo=excluded.source_repo, source_ref=excluded.source_ref,
 			source_asset=excluded.source_asset`,
-		u.AppID, strings.Join(u.Groups, ","), boolToInt(u.Home), boolToInt(u.Enabled),
+		u.AppID, FormatGroupList(u.Groups), boolToInt(u.Home), boolToInt(u.Enabled),
 		u.Name, u.Description, u.Icon, u.UploadedBy, u.UploadedAt.Unix(), u.Digest, u.SizeBytes,
 		u.SourceRepo, u.SourceRef, u.SourceAsset)
 	if err != nil {

@@ -267,3 +267,34 @@ func TestReconfigureSettersTakeEffect(t *testing.T) {
 		t.Error("emptying the admin group should disable the admin UI")
 	}
 }
+
+// A group list may also be written as a JSON array, which is the only
+// form that can spell a name containing a comma.
+func TestGroupSetJSONList(t *testing.T) {
+	const cmsConnect = "CO:COU:CMS Connect COU:members:active"
+
+	gs := newGroupSet(`["` + cmsConnect + `", "Lab, Smith"]`)
+	if !gs.allows([]string{cmsConnect}) {
+		t.Error("a name with spaces, read from JSON, did not match")
+	}
+	// Still case-insensitive, as the comma form is.
+	if !gs.allows([]string{"co:cou:cms connect cou:members:active"}) {
+		t.Error("JSON-read names lost case-insensitive matching")
+	}
+	if !gs.allows([]string{"Lab, Smith"}) {
+		t.Error("a name holding a comma did not match")
+	}
+	if gs.allows([]string{"Lab", "Smith"}) {
+		t.Error("a name holding a comma was split into two")
+	}
+
+	// A list that does not parse must refuse, not admit everyone: an
+	// empty set is how these knobs say "no group required".
+	bad := newGroupSet(`["` + cmsConnect)
+	if !bad.configured() {
+		t.Fatal("a malformed JSON list read as no requirement at all")
+	}
+	if bad.allows([]string{"anybody"}) {
+		t.Error("a malformed JSON list admitted a user")
+	}
+}

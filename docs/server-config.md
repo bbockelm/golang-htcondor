@@ -27,7 +27,7 @@ otherwise switch it on for deployments that never asked.
 | `HTTP_API_DB_PATH` | Unified SQLite DB (sessions, OAuth2, IDP, templates, API keys). Default `$(LOCAL_DIR)/htcondor-api.db`. |
 | `HTTP_API_SIGNING_KEY` | Pool signing key for minting per-request tokens. Defaults to `SEC_TOKEN_POOL_SIGNING_KEY_FILE`. |
 | `HTTP_API_KEK_FILE` | Path to the master Key Encryption Key (32 raw bytes or 64-char hex; mode 0600/0400). Generate with `openssl rand -hex 32 > <path> && chmod 0600 <path>`. |
-| `HTTP_API_WEBUI_ACCESS_GROUP` | Comma-separated group(s) permitted to log in to the web interface. Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. Reloaded on SIGHUP. See [Authorization groups](server-auth.md#authorization-groups). |
+| `HTTP_API_WEBUI_ACCESS_GROUP` | Comma-separated group(s) permitted to log in to the web interface (or a JSON array of names, for names holding a comma). Unset falls back to `HTTP_API_MCP_ACCESS_GROUP`. Reloaded on SIGHUP. See [Authorization groups](server-auth.md#authorization-groups). |
 | `HTTP_API_WEBUI_ADMIN_GROUP` | Comma-separated group(s) whose members can reach the admin pages. Unset disables the admin UI. Reloaded on SIGHUP. |
 | `HTTP_API_WEBUI_SITE_NAME` / `HTTP_API_WEBUI_SITE_TAGLINE` | What the pages call this access point. Reloaded on SIGHUP. See [Web UI branding](server-branding.md). |
 | `HTTP_API_WEBUI_FOOTER_LOGOS` | JSON array of `{"src", "alt", "href"}` for the footer's institutional band. Unset keeps the shipped CHTC/Morgridge/UW band; `[]` removes it. Reloaded on SIGHUP. |

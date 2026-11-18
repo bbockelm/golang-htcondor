@@ -172,7 +172,7 @@ func siteAppSettingRows(id string, set siteapps.Policy, app siteapps.App, editab
 		}
 		switch name {
 		case "GROUPS":
-			row.Value = strings.Join(set.Groups, ", ")
+			row.Value = siteapps.FormatGroupList(set.Groups)
 		case "HOME":
 			row.Value = boolSettingValue(set.Home)
 			row.Effective, row.EffectiveFrom = boolString(app.Home), "default"
