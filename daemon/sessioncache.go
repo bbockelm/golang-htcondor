@@ -12,7 +12,6 @@ import (
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/bbockelm/golang-htcondor/sessioncache"
-	"github.com/bbockelm/golang-htcondor/sessioncache/sqlite"
 )
 
 // defaultSessionSnapshotInterval is how often the session cache is persisted
@@ -156,12 +155,20 @@ func (d *Daemon) sessionPersistenceFromConfig() (func(), error) {
 	if len(rawKeys) == 0 {
 		return fail("no pool signing keys are available (set SEC_PASSWORD_DIRECTORY); the session database cannot be encrypted without one")
 	}
-	keys := make([]sqlite.SigningKey, 0, len(rawKeys))
+	keys := make([]sessioncache.SigningKey, 0, len(rawKeys))
 	for id, material := range rawKeys {
-		keys = append(keys, sqlite.SigningKey{ID: id, Material: material})
+		keys = append(keys, sessioncache.SigningKey{ID: id, Material: material})
 	}
 
-	store, err := sqlite.Open(dbPath, keys, d.Slog())
+	// Whichever store is linked. For an ordinary build that is SQLite, which
+	// sessionstore_sqlite.go blank-imports; a build with -tags condor_nosqlite
+	// links none, and OpenDefault says so rather than quietly skipping
+	// persistence the administrator asked for.
+	store, err := sessioncache.OpenDefault(sessioncache.OpenOptions{
+		Path: dbPath,
+		Keys: keys,
+		Log:  d.Slog(),
+	})
 	if err != nil {
 		return fail("opening %s failed: %v", dbPath, err)
 	}
@@ -177,7 +184,7 @@ func (d *Daemon) sessionPersistenceFromConfig() (func(), error) {
 		return fail("restoring persisted sessions from %s failed: %v", dbPath, err)
 	}
 	d.log.Info(logging.DestinationGeneral, "session persistence enabled",
-		"path", dbPath, "signing_keys", len(keys))
+		"path", dbPath, "signing_keys", len(keys), "store", sessioncache.DefaultOpenerName())
 	return func() { _ = store.Close() }, nil
 }
 

@@ -558,6 +558,11 @@ func (d *Daemon) ServeListeners(ctx context.Context, serve func(context.Context,
 	// restore/persist the CEDAR session cache without any per-binary wiring (see
 	// sessionPersistenceFromConfig). Runs before the serve loops so the first
 	// request can already resume a session.
+	//
+	// The store comes from whichever backend is linked. An ordinary build
+	// links SQLite (sessionstore_sqlite.go); one built with
+	// -tags condor_nosqlite links none and fails here rather than starting
+	// without the persistence that was configured.
 	closeSessions, err := d.sessionPersistenceFromConfig()
 	if err != nil {
 		return err

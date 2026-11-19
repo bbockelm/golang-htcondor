@@ -32,6 +32,22 @@ As a server (pre-built container, multi-arch amd64/arm64):
 docker run -p 8080:8080 ghcr.io/bbockelm/golang-htcondor:latest
 ```
 
+### Building a daemon without the session store
+
+`daemon` links a SQLite-backed session store so `SEC_PERSIST_SESSIONS` works
+with no wiring in the binary. That engine is about 4.3 MB, which a daemon that
+never persists sessions pays for nothing -- it matters most where the binary
+itself is the payload, such as one copied onto a remote host to run there.
+
+```bash
+go build -tags condor_nosqlite ./...
+```
+
+The tag only removes the *default registration*. A binary that wants
+persistence in such a build imports a store package itself; and a daemon built
+with the tag whose configuration sets `SEC_PERSIST_SESSIONS` refuses to start,
+rather than running without the persistence it was asked for.
+
 Or build from source:
 
 ```bash

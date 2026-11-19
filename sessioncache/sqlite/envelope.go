@@ -10,6 +10,8 @@ import (
 	"io"
 
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/bbockelm/golang-htcondor/sessioncache"
 )
 
 // Envelope encryption for the persisted session cache.
@@ -41,10 +43,12 @@ const (
 // SigningKey is one HTCondor signing key used as a key-encryption key. ID is the
 // key name (e.g. "POOL"); Material is the raw (unscrambled) key bytes. Build it
 // from htcondor.LoadSigningKeys.
-type SigningKey struct {
-	ID       string
-	Material []byte
-}
+// SigningKey is an alias for sessioncache.SigningKey.
+//
+// The type moved to the neutral package so a caller can load pool signing
+// keys without naming a storage backend. It stays spelled here because
+// existing code writes sqlite.SigningKey, and an alias costs nothing.
+type SigningKey = sessioncache.SigningKey
 
 // masterKeyRow is the persisted wrapping of the database master key by a single
 // signing key.
