@@ -24,12 +24,11 @@ package config
 //go:generate go run ../param/generate.go
 
 import (
-	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -878,19 +877,38 @@ func detectMemorySyscall() int {
 	return 0
 }
 
-// detectMemorySysctl uses sysctl to get memory on BSD-like systems
+// detectMemorySysctl reads the machine's physical memory with sysctl(2).
+//
+// It makes the system call directly and does NOT fork `sysctl`. That is the
+// whole point of this function's shape: it runs from initBuiltins, so EVERY
+// config.New on darwin and freebsd used to fork a process, and a stalled fork
+// hung the caller forever -- observed under load as a daemon test sitting
+// here for eleven minutes, stalling an entire `go test ./...` with nothing in
+// the output naming the cause.
+//
+// A context timeout is not enough to fix that, which is worth recording
+// because it is the obvious repair and it does not work: with
+// exec.CommandContext the deadline kills the process, but Cmd.Output then
+// blocks in awaitGoroutines waiting for the output pipe to close, and the
+// hang simply moves. Measured: the same test hung there with a 2s deadline in
+// place. cmd.WaitDelay would bound that second wait; a syscall has neither
+// problem and is faster besides.
+//
+// The implementation is per-platform (memory_bsd.go, memory_other.go) so that
+// golang.org/x/sys/unix is never imported on a GOOS that has no sysctl.
 func detectMemorySysctl() int {
-	cmd := exec.CommandContext(context.Background(), "sysctl", "-n", "hw.memsize")
-	output, err := cmd.Output()
-	if err != nil {
+	bytes, ok := sysctlPhysicalMemory()
+	if !ok {
 		return 0
 	}
-	bytes, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
-	if err != nil {
+	mib := bytes / (1024 * 1024)
+	// Refuse rather than wrap. It cannot happen on a 64-bit build, but on a
+	// 32-bit one a wrapped value would be a plausible-looking wrong answer
+	// feeding DETECTED_MEMORY, which is worse than no answer at all.
+	if mib > math.MaxInt {
 		return 0
 	}
-	// Convert bytes to MiB
-	return int(bytes / (1024 * 1024))
+	return int(mib)
 }
 
 // htcondorArch maps a uname machine name as sysapi_condor_arch does.
