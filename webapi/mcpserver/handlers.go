@@ -3129,9 +3129,14 @@ func containsNullBytes(data []byte) bool {
 	return false
 }
 
-// checkOAuthServicesNeeded queries the first proc of a submitted cluster to see if
-// a job transform added the OAuthServicesNeeded attribute. If found, it returns a
-// message instructing the user to bootstrap the required credentials.
+// checkOAuthServicesNeeded queries the first proc of a submitted cluster for
+// the OAuthServicesNeeded attribute. If it is there, it returns a message
+// instructing the user to bootstrap the required credentials.
+//
+// It reads the attribute back from the queue rather than from the submit file
+// because the two sources are both real: the submission's own
+// use_oauth_services, and a schedd job transform that adds services the
+// submitter never named (ap2001 adds "rdrive scitokens" to every job).
 func (s *Server) checkOAuthServicesNeeded(ctx context.Context, clusterID int) string {
 	constraint := fmt.Sprintf("ClusterId == %d && ProcId == 0", clusterID)
 	projection := []string{"OAuthServicesNeeded"}

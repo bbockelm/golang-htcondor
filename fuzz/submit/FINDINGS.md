@@ -817,6 +817,28 @@ twice, from two different sweeps, and both numbers were stale by the time
 they were written. The map is the list: a count written here is stale the
 next time one is fixed, and nothing keeps prose in sync with it.
 
+## The generator cannot reach `use_oauth_services`
+
+`use_oauth_services` was unimplemented until 2026-11-21, and no amount of
+fuzzing would have said so. The generator's vocabulary is `oracle.Keywords()`,
+HTCondor's own submit-keyword table as the linked `SubmitHash` exposes it
+through `get_submit_keywords()` -- and that table, 256 entries in 26.2.0, does
+not contain `use_oauth_services`. Nor `delegate_job_GSI_credentials_lifetime`.
+It does contain `use_scitokens`, `scitokens_file` and `on_evict_checks`, so
+this is a specific hole rather than "special keywords are absent".
+
+A keyword the table omits can still be reached by a hand-written seed, and the
+settings `use_oauth_services` reads -- `<service>_oauth_permissions` and its
+two siblings -- could not be generated under any table, because the service
+name is the submitter's and the keyword table has no shape for that.
+
+So the parity this package reports is parity over its vocabulary. Anything
+outside it, this harness is silent about rather than happy about, and a
+keyword found missing by other means gets its oracle test elsewhere:
+`TestOAuthServicesNeededMatchesCondorSubmit` in the root package is that one,
+driving `condor_submit` with `-dry-run:oauth=1` because a job asking for
+credentials goes to the credd before it writes an ad.
+
 ## Fixed
 
 **`on_evict_checks` was not implemented.** It names submit-side transforms
