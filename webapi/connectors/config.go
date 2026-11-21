@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"golang.org/x/oauth2"
 )
 
 // Reading connector definitions out of the HTCondor configuration.
@@ -59,6 +61,11 @@ type Definition struct {
 	// connector, for the admin page to show and for an operator to grep
 	// for afterwards.
 	Origin string
+
+	// AuthStyle is how client credentials go on a token request. The
+	// zero value means probe; see BuiltinDef.AuthStyle for why that is
+	// worth avoiding where the provider is known.
+	AuthStyle oauth2.AuthStyle
 }
 
 // ClientSecret reads the secret from disk.
@@ -204,6 +211,7 @@ func (c *ConfigSource) Definition(id ID) (Definition, bool) {
 		d.AuthorizationURL = def.AuthorizationURL
 		d.TokenURL = def.TokenURL
 		d.Scopes = append([]string(nil), def.DefaultScopes...)
+		d.AuthStyle = def.AuthStyle
 	}
 
 	if v, ok := c.get(id, "KIND"); ok {

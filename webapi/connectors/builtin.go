@@ -1,6 +1,10 @@
 package connectors
 
-import "sort"
+import (
+	"sort"
+
+	"golang.org/x/oauth2"
+)
 
 // The builtin catalogue: definitions that ship with this server.
 //
@@ -86,6 +90,23 @@ type BuiltinDef struct {
 	TransferMethod string
 	// Summary is one line for the admin page's catalogue.
 	Summary string
+
+	// AuthStyle is how the client credentials go on a token request.
+	//
+	// Worth setting, because the zero value makes x/oauth2 PROBE: it
+	// sends the request with the secret in the Authorization header,
+	// and on ANY error -- including a 503 -- silently retries once with
+	// the secret in the body (internal/token.go:216-246). Two things
+	// follow. The secret goes out in two forms on the first request,
+	// and a single transient failure is invisible, but only until the
+	// style is cached, after which it is not. Failures that depend on
+	// how many requests have gone before are the hardest kind to
+	// reason about.
+	//
+	// Set only where the provider's documentation has actually been
+	// read. The zero value keeps the probe, which is the right
+	// behaviour for a provider nobody has checked.
+	AuthStyle oauth2.AuthStyle
 }
 
 // builtins is the catalogue, keyed by name within the builtin namespace.
@@ -95,8 +116,13 @@ var builtins = map[string]BuiltinDef{
 		AuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth",
 		TokenURL:         "https://oauth2.googleapis.com/token",
 		DefaultScopes:    []string{"https://www.googleapis.com/auth/drive.file"},
-		TransferMethod:   "gdrive",
-		Summary:          "Google Drive, limited to files the user picks",
+		// Google's web-server page lists client_secret among the token
+		// request's PARAMETERS and its sample body sends client_id
+		// there, so the credentials go in the body and no probe is
+		// needed. Read 2026-11-21; see connectors/mockgoogle.
+		AuthStyle:      oauth2.AuthStyleInParams,
+		TransferMethod: "gdrive",
+		Summary:        "Google Drive, limited to files the user picks",
 	},
 	"box": { //nolint:gosec // G101: published endpoint, not a credential
 		Kind:             KindOAuth2,
