@@ -167,6 +167,32 @@ func TestExchangeWithoutARefreshTokenIsRefused(t *testing.T) {
 	}
 }
 
+// Two users get separate grants. The design's sharpest rule about
+// stored credentials is that one must never be usable for another
+// user's request, and this is the first place that could go wrong: a
+// Flow holds every pending authorization in one map.
+func TestTwoUsersGetSeparateGrants(t *testing.T) {
+	h := newHarness(t)
+
+	alice := h.connect(t, "alice")
+	bob := h.connect(t, "bob")
+
+	if alice.RefreshToken == bob.RefreshToken {
+		t.Fatal("two users were given the same refresh token")
+	}
+	if alice.AccessToken == bob.AccessToken {
+		t.Fatal("two users were given the same access token")
+	}
+	// Revoking one leaves the other working.
+	h.google.Revoke(alice.RefreshToken)
+	if _, err := h.flow.Refresh(t.Context(), h.def, testClientSecret, bob.RefreshToken); err != nil {
+		t.Errorf("revoking alice's grant broke bob's: %v", err)
+	}
+	if _, err := h.flow.Refresh(t.Context(), h.def, testClientSecret, alice.RefreshToken); err == nil {
+		t.Error("alice's revoked grant still refreshed")
+	}
+}
+
 // --- state: the part that is ours -------------------------------------
 
 // A callback presented by a different session is refused. The state
