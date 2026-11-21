@@ -687,6 +687,70 @@ Scope: the authorization-code flow with PKCE, refresh and its failures
 update, 401/403/404/429 with Google's documented error bodies, and
 `Retry-After`.
 
+## Answering the grant-durability question
+
+Google's documentation does not state it. The [scope
+guide](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+says `drive.file` covers files "you open with an app or that the user
+shares with an app while using the Google Picker API" — the language of a
+relationship between an app and a file, not of a session — and the
+[Picker guide](https://developers.google.com/workspace/drive/picker/guides/overview-desktop)
+describes the returned ids without saying how long they stay usable.
+Secondary sources point the same way without settling it: that access is
+"per user, per file", and that authorization ends "when the user
+deauthorizes the app", which is the language of revocation rather than
+expiry. Nobody documents a timer. That is evidence, not an answer.
+
+So it gets tested, and the test has to be built so that passing it means
+something.
+
+**What must be proved:** a token minted from a *refresh token*, in a
+*different process*, after the browser session that did the picking is
+*gone*, can still read the picked file.
+
+1. Register a development client (Web application, `drive.file`).
+2. In a browser, run auth-code + PKCE with `access_type=offline`.
+   Keep the refresh token.
+3. Open the Picker, pick one file, record its id.
+4. **Destroy the browser session.** Close it, clear cookies, ideally
+   move to another machine. Doing this step in the same tab is how the
+   test passes while proving nothing.
+5. Discard the original access token and wait out its hour.
+6. In a separate process, holding only the refresh token: mint a new
+   access token and `GET /drive/v3/files/<id>?alt=media`.
+
+200 means durable and `direct` mode is viable. 404 means session-scoped,
+`direct` collapses into `spool`, and the ID-addressed plugin was wasted
+effort. Note it is **404 and not 403**: under `drive.file` a file the app
+was never granted does not exist as far as the app is concerned, which is
+the distinction `gdrive2_plugin.describe_http_error` already explains to
+whoever reads the hold reason.
+
+**Two controls, or a failure is uninterpretable.** Without them a 404 at
+step 6 cannot be told from a broken refresh:
+
+- Read a file the app *created* rather than picked, with the same
+  refreshed token. If that fails too, the refresh is the problem, not the
+  grant.
+- Read the picked file immediately at step 3 with the original access
+  token, to establish that the grant ever existed.
+
+**A trap in the setup itself.** An External OAuth client left in
+*Testing* publishing status has been reported to expire refresh tokens
+after seven days. A dev client will be in Testing. If refresh starts
+failing about a week in, that is the consent screen's publishing status
+and not a finding about `drive.file` — and it is exactly the sort of
+thing that gets written down as a limitation of the design.
+
+**Worth answering in the same sitting**, because standing the client up
+is the expensive part and the rest is minutes:
+
+- Does a *folder* pick grant its children? That is the second open
+  question, and the same harness answers it.
+- Does the grant survive refresh-token rotation?
+- Does revoking and re-granting the app reset it?
+- Is picking the same file twice idempotent?
+
 ## What bites
 
 **The stock gdrive plugin cannot work under `drive.file`.** It resolves
@@ -722,13 +786,19 @@ than grow a second one.
 - **Does a `drive.file` grant survive the session that created it?** The
   whole of `direct` mode rests on yes. If it turns out to be
   session-scoped, `direct` collapses into `spool` and the plugin patch is
-  wasted. Verify before building `direct`.
+  wasted. See "Answering the grant-durability question"; verify before
+  building `direct`.
 - **Folder picking under `drive.file`** — whether picking a folder
   usefully grants its contents, which decides whether "pick a directory
   of inputs" is offerable.
-- **Can a job-supplied plugin claim a method name** already advertised by
-  a stock plugin, or must a prototype use a distinct scheme? Decides
-  whether `direct` can be tried before the upstream patch lands.
+- **Can a job-supplied plugin claim a method name already advertised by
+  a stock plugin?** Still unknown, and no longer blocking: the design
+  chose a distinct method for its own reasons. The half that mattered is
+  answered — `SetRequirements` excludes a method the job supplies itself
+  from the generated `TARGET.HasFileTransferPluginMethods` clause
+  (`submit_utils.cpp:6337`), so a job carrying `gdrive2` needs no execute
+  node to advertise it and `direct` can be tried before anything is
+  deployed. Worth confirming on a real pool before relying on it.
 - **Vault kind is unbuilt and unneeded so far.** It is in the table above
   because the entry point must not be shaped in a way that excludes it,
   not because anything has asked for it. Build it when an access point
