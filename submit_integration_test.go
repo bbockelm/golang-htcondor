@@ -87,6 +87,15 @@ func runCondorSubmit(submitContent string) (*classad.ClassAd, error) {
 // runCondorSubmitEnv is runCondorSubmit with extra environment, which is
 // how a test hands condor_submit configuration: _CONDOR_<KNOB>=value.
 func runCondorSubmitEnv(submitContent string, env []string) (*classad.ClassAd, error) {
+	return runCondorSubmitDry(submitContent, env, "-dry-run")
+}
+
+// runCondorSubmitDry is runCondorSubmitEnv with the dry-run flag spelled out,
+// for the tests that need one of its options. `-dry-run:oauth=1` is the one
+// in use: a job that asks for OAuth credentials sends condor_submit to the
+// credd before it writes anything, and that option makes it report the
+// request it would have sent and carry on instead.
+func runCondorSubmitDry(submitContent string, env []string, dryRunFlag string) (*classad.ClassAd, error) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "condor_submit_test_*")
 	if err != nil {
@@ -105,7 +114,7 @@ func runCondorSubmitEnv(submitContent string, env []string) (*classad.ClassAd, e
 
 	// Run condor_submit -dry-run
 	//nolint:gosec,noctx // G204: Test uses fixed condor_submit command; noctx: test doesn't need cancellation
-	cmd := exec.Command("condor_submit", "-dry-run", classadPath, submitPath)
+	cmd := exec.Command("condor_submit", dryRunFlag, classadPath, submitPath)
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}

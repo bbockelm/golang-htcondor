@@ -816,6 +816,11 @@ func (sf *SubmitFile) MakeJobAd(jobID JobID, queueVars map[string]string) (*clas
 		return nil, err
 	}
 
+	// The OAuth credentials the job asks for (SetOAuth). It goes where
+	// condor_submit puts it, after the accounting group and before the
+	// `+Attr` passes, so a `+OAuthServicesNeeded` overwrites it.
+	sf.setOAuthServices(ad)
+
 	// Set job status and control attributes
 	if err := sf.setJobStatusControl(ad); err != nil {
 		return nil, err
