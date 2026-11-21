@@ -92,6 +92,11 @@ SUPPORTED_METHOD = 'gdrive2'
 # Google credential under a second name -- a second consent screen, a second
 # grant to revoke, for no reason but a plugin version number. A job says
 # `use_oauth_services = gdrive` whichever plugin it uses.
+#
+# This is the DEFAULT. A URL may name its credential outright with
+# `<cred>+gdrive2://`, which is how a server provisioning into a credd it
+# shares with an administrator reaches a credential it had to store under a
+# service name of its own. See get_token_name.
 CREDENTIAL_NAME = 'gdrive'
 
 # Transient HTTP statuses worth retrying. 429 is Drive's rate limit, which it
@@ -116,7 +121,7 @@ URL forms:
   {1}://<folderId>/<name>        upload, creating/replacing <name> in that folder
   {1}:///<name>                  upload into My Drive root
 
-  <handle>+{1}://...             use the credential {2}_<handle>
+  <cred>+{1}://...               read the credential <cred>.use (verbatim)
 
 <name> is the job's local file name. HTCondor takes it from the last path
 component of the URL ("the destination file is given by the file name within
@@ -181,13 +186,29 @@ def parse_args():
 def get_token_name(url):
     '''The credential to read, from the URL's scheme.
 
-    `<handle>+gdrive2://...` reads gdrive_<handle>; a bare scheme reads
-    gdrive. Note the credential is named for the SERVICE, never for this
-    plugin -- see CREDENTIAL_NAME.'''
+    `<cred>+gdrive2://...` reads `<cred>.use`, VERBATIM. A bare scheme
+    reads gdrive.
+
+    This differs from the stock gdrive plugin, where `<handle>+gdrive://`
+    means the composed name `<provider>_<handle>`. The difference is
+    deliberate. A server that provisions credentials into a credd it
+    shares with an administrator has to store them under a service name
+    of its own -- `webapi_gdrive`, say -- and the composing form cannot
+    reach that name: it would need the provider half to be `webapi`,
+    which is not a transfer method.
+
+    It is safe for the two plugins to read the same syntax differently
+    because they never see the same URL. The method differs, so no URL is
+    ambiguous between them. It would not be safe if this plugin ever
+    claimed the `gdrive` method, which is one more reason it does not.'''
     scheme = url.split('://')[0]
     if '+' in scheme:
-        (handle, _provider) = scheme.split('+', 1)
-        return '{0}_{1}'.format(CREDENTIAL_NAME, handle)
+        (cred, _method) = scheme.split('+', 1)
+        if not cred:
+            raise ValueError(
+                "empty credential name in '{0}': expected "
+                "<cred>+{1}://...".format(url, SUPPORTED_METHOD))
+        return cred
     return CREDENTIAL_NAME
 
 

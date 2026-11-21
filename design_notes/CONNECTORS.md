@@ -188,6 +188,19 @@ that drift.
 A `builtin:` connector needs no `_KIND`: the definition knows. A `site:`
 one must say.
 
+Plus one knob that is not per-connector:
+
+```
+HTTP_API_CONNECTOR_PREFIX = webapi
+```
+
+the service-name prefix everything this server stores in the credd goes
+under; see "The credd is a directory we share with the sysadmin".
+
+Configuration is only one of the two ways to declare a connector — the
+admin page is the other, and configuration wins where both do. See
+"Configuring one".
+
 The secret is a **file path in config, bytes on disk** — config values are
 public, so the path goes in config and the secret does not. Same rule as
 `HTTP_API_KEK_FILE`.
@@ -204,32 +217,70 @@ stays true. They register one with Google, not with us.
 
 ## Storage
 
-`oauth2` kind only. Modelled on `upstream_refresh_tokens` (migration
-0011), which already holds a third-party refresh token under the same
-threat model, so one KEK covers every long-lived secret rather than each
-growing its own scheme.
+Two tables: what a connector *is*, and what a user has *granted*. They
+have different lifetimes and different blast radii, and keeping them
+apart is what lets a connector be revoked without being deleted.
+
+Both follow `upstream_refresh_tokens` (migration 0011), which already
+holds a third-party secret under the same threat model, so one KEK covers
+every long-lived secret rather than each growing its own scheme.
 
 ```sql
+-- A connector declared HERE rather than in the configuration. A
+-- connector the configuration declares has no row: configuration wins,
+-- and a row that merely loses is a row an operator can edit to no
+-- effect.
+CREATE TABLE connectors (
+    id                 TEXT NOT NULL,   -- "site:cryoem", "builtin:gdrive"
+    kind               TEXT NOT NULL,   -- credd | vault | oauth2
+    client_id          TEXT NOT NULL DEFAULT '',
+    client_secret      BLOB,            -- sealed; never leaves the server
+    client_secret_dek  BLOB,            -- wrapped data key, NULL if unsealed
+    secret_updated_at  TIMESTAMP,       -- shown; the secret itself is not
+    authorization_url  TEXT NOT NULL DEFAULT '',   -- site: only
+    token_url          TEXT NOT NULL DEFAULT '',   -- site: only
+    scopes             TEXT NOT NULL DEFAULT '',
+    groups             TEXT NOT NULL DEFAULT '',
+    transfer           TEXT NOT NULL DEFAULT 'spool',
+    enabled            BOOLEAN NOT NULL DEFAULT 1,
+    created_at         TIMESTAMP NOT NULL,
+    updated_at         TIMESTAMP NOT NULL,
+    PRIMARY KEY (id)
+);
+
+-- What one user granted for one connector. oauth2 kind only: credd and
+-- vault connectors leave their credential in the credd and keep nothing
+-- here.
 CREATE TABLE connector_credentials (
     subject           TEXT NOT NULL,   -- our user
-    provider          TEXT NOT NULL,   -- "gdrive"
+    connector         TEXT NOT NULL,   -- "builtin:gdrive"
     provider_subject  TEXT NOT NULL DEFAULT '',
     refresh_token     BLOB NOT NULL,
-    refresh_token_dek BLOB,            -- NULL when stored in the clear
+    refresh_token_dek BLOB,
     granted_scopes    TEXT NOT NULL DEFAULT '',
     obtained_at       TIMESTAMP NOT NULL,
     last_refreshed_at TIMESTAMP,
     last_used_at      TIMESTAMP,
-    PRIMARY KEY (subject, provider)
+    PRIMARY KEY (subject, connector)
 );
 ```
+
+`connector` is the id, namespace and all, so a `site:gdrive` grant and a
+`builtin:gdrive` grant are different rows for the same user. They are
+different applications with different client registrations, and merging
+them would hand one's token to the other.
 
 `granted_scopes` is what the provider actually granted, which is not
 always what was asked for — the same reason 0011 records it.
 
-`last_used_at` is what makes a connector tell a user their Drive
-connection needs renewing *before* a job holds, rather than after. The
-credd sweeps by last use and cannot report; this can.
+`last_used_at` is what lets a connector tell a user their Drive
+connection needs renewing *before* a job holds, rather than after, and
+what answers the operator's question of whether anyone uses this at all.
+The credd sweeps by last use and cannot report; this can.
+
+Deleting a `connectors` row deletes its credentials. They are unreachable
+otherwise: no page lists a credential whose connector is gone, so nobody
+could revoke it.
 
 ## Maintenance
 
@@ -263,40 +314,83 @@ we should say so rather than let config decide.
 A credential in the credd is a file: `<service>_<handle>.use` under the
 user's cred dir. The admin's credmons write there too, and nothing
 arbitrates. If this server writes `gdrive.use` for a user whose
-administrator has also configured a `gdrive` OAuth2 credmon, the two are
-the same path — we clobber their token, or their credmon refreshes ours
-using *their* client registration, which is a different application
-entirely.
+administrator has also configured a `gdrive` OAuth2 credmon, that is the
+same path — we clobber their token, or their credmon refreshes ours using
+*their* client registration, a different application entirely.
 
-So everything this server stores goes under a **handle of its own**:
+So everything this server stores goes under a **service name of its own**:
 
 ```
-HTTP_API_CONNECTOR_HANDLE = webapi      # default
+HTTP_API_CONNECTOR_PREFIX = webapi      # default
 ```
 
-`builtin:gdrive` then stores service `gdrive`, handle `webapi`, giving
-`gdrive_webapi.use`, which a job names as `gdrive*webapi` and a transfer
-plugin addresses as `webapi+gdrive2://...`. The handle is configurable
-because two API servers in front of one access point would otherwise
-collide with each other, having both avoided colliding with the admin.
+`builtin:gdrive` stores the service `webapi_gdrive`, giving
+`webapi_gdrive.use`, which a job names as `use_oauth_services =
+webapi_gdrive`. The prefix is configurable because two API servers in
+front of one access point would otherwise collide with each other, having
+both successfully avoided the administrator.
 
-This uses HTCondor's own mechanism rather than inventing one: the handle
-exists precisely to say "the same service, provisioned differently", and
-`contrib/gdrive2_plugin` already reads `<handle>+gdrive2://`.
+**Not a handle**, which was the first design and is worse on three counts:
+
+- A handle buys no protection a service name does not. The credmon's
+  guards key on `token_name`, the whole filename stem
+  (`OAuthCredmon.py:142-158`), so `gdrive_webapi` and `webapi_gdrive` are
+  equally distinct from `gdrive`.
+- `CredSorter::Sort` keys on the **service alone**. Under a handle the
+  service is still `gdrive`, so an administrator with `GDRIVE_CLIENT_ID`
+  set flips the credd's default from `.use` to `.top`
+  (`store_cred.cpp:510-521`) and `NeedRefresh` becomes load-bearing
+  rather than belt-and-braces. A service name the administrator will
+  never configure sorts as `UnknownType`, whose default is already what
+  we want.
+- A handle cannot be asked for directly. It exists only as a side effect
+  of scanning `<service>_oauth_(permissions|resource|options)_<handle>`
+  keys, so the submit file needs a second, vestigial command whose only
+  purpose is to create the handle. `use_oauth_services = webapi_gdrive`
+  is one command and one name.
+
+`_` is legal in a service name (`okay_for_oauth_filename`,
+`store_cred.cpp:280-297`).
+
+Worth knowing: `<service>_<handle>` is a **lossy** encoding. Service
+`webapi_gdrive` with no handle and service `webapi` with handle `gdrive`
+produce the same `webapi_gdrive.use`. The file is the real namespace
+whichever scheme is chosen, which is the last argument for putting the
+distinguishing prefix in the part we control outright.
 
 **Write no `.meta`.** `OAuthCredmon.check_access_token` skips any token
 with no metadata file (`OAuthCredmon.py:154-158`), so a `.use` we wrote
-is correctly ignored by an admin's OAuth2 credmon rather than fought
-over. Writing one would hand our credential to a credmon configured for
-somebody else's OAuth2 client. The namespace keeps the files apart; the
-absent `.meta` keeps the *credmon* away even if a name ever lines up.
+is ignored by an administrator's OAuth2 credmon rather than fought over.
+Writing one would offer our credential to a credmon configured for
+somebody else's OAuth2 client. The service name keeps the files apart;
+the absent `.meta` keeps the credmon away even if a name ever lines up.
 
-Worth knowing while in there: an invalid-JSON `.meta` passes that guard
-and then `should_renew` dereferences an unbound `token_metadata`
-(`OAuthCredmon.py:52-63` — `except ValueError` leaves it unassigned and
-line 63 reads it). Not ours to trip, but it is how a corrupt metadata
-file takes out a token's renewal with an `UnboundLocalError` rather than
-a diagnosis. Worth an upstream patch alongside the plugin.
+Worth an upstream patch while in there: an invalid-JSON `.meta` passes
+that guard and then `should_renew` dereferences an unbound
+`token_metadata` (`OAuthCredmon.py:52-63` — `except ValueError` leaves it
+unassigned and line 63 reads it), so a corrupt metadata file takes out a
+token's renewal with an `UnboundLocalError` rather than a diagnosis.
+
+### The plugin has to be told which credential
+
+`contrib/gdrive2_plugin` derives its credential from its method:
+`gdrive2://` reads `gdrive.use`. A service name of our own breaks that,
+and the stock `<handle>+method://` syntax cannot express the fix — it
+always composes `<provider>_<handle>`, and reaching `webapi_gdrive` that
+way would need the provider to be `webapi`, which is not a transfer
+method.
+
+So v2 reads `<cred>+gdrive2://` as the credential name **verbatim**:
+
+```
+webapi_gdrive+gdrive2://<fileId>/data.csv
+```
+
+This deliberately differs from the stock plugin, where the same syntax
+means `<provider>_<handle>`. It is safe because the two never see the
+same URL: the methods differ, so no URL is ambiguous between them. It
+would not be safe if v2 ever claimed the `gdrive` method, which is one
+more reason it does not.
 
 ## Two transfer paths
 
@@ -362,6 +456,116 @@ The Picker is the grant mechanism: the user picking a file is what
 authorizes us for it. So the same client's token, refreshed later onto an
 execute node, can still read it. **This is the load-bearing assumption of
 `direct` mode and it is unverified** — see "Still open".
+
+## Configuring one: config file or database
+
+A connector may be declared two ways, and the rule is the one site apps
+already use, because an operator who has learned it once should not have
+to learn a second:
+
+- **The HTCondor configuration** declares it. Read-only here. Changing it
+  means changing the configuration and running `condor_reconfig`.
+- **This server's database** holds it. Editable from the admin page, in
+  force as soon as it is saved.
+
+**Configuration wins.** If both declare the same id, the configuration is
+what runs. The page must say so against the shadowed row rather than
+hiding it: a stored connector that silently does nothing is an operator
+editing a form that has no effect, and finding out from a user.
+
+### Where
+
+`/admin/connectors`, in `ADMIN_NAV`.
+
+A naming hazard worth heading off: the admin pane already has **OAuth2
+Clients**, which are clients of *our* identity provider — applications
+connecting **to** this server. Connectors are accounts this server
+connects **to**. Opposite directions, adjacent words, one letter of
+difference in a hurried reading. The page should say which it is in a
+sentence, not rely on the title.
+
+### The API
+
+Mirrors `handlers_site_apps` / `siteapps_config.go`, including the
+`origin` / `stored_here` / `editable` triple that page already renders:
+
+```
+GET    /api/v1/admin/connectors                      list, with provenance
+POST   /api/v1/admin/connectors                      create a stored one
+GET    /api/v1/admin/connectors/{ns}:{name}/config   settings rows
+PUT    /api/v1/admin/connectors/{ns}:{name}/config   editable rows only
+DELETE /api/v1/admin/connectors/{ns}:{name}          remove a stored one
+GET    /api/v1/admin/connectors/{ns}:{name}/users    who connected, last use
+POST   /api/v1/admin/connectors/{ns}:{name}/revoke   drop stored credentials
+POST   /api/v1/admin/connectors/{ns}:{name}/test     check it is usable
+```
+
+A settings row is `{key, setting, value, effective, effective_from,
+editable}` as site apps renders it, so `HTTP_API_CONNECTOR_BUILTIN_GDRIVE_
+GROUPS` appears under its real name and an operator can find it in a
+configuration file afterwards.
+
+### The secret is write-only
+
+The one thing site apps does not have, and the part to get right first.
+
+- **Never rendered.** Not in `GET`, not masked, not by length. A row for
+  the secret carries `secret_set` and `secret_updated_at` and no value.
+- **Omission means unchanged.** A `PUT` without the field leaves it
+  alone; an explicit null clears it. A form that round-trips an empty
+  string into "no secret" is how a working connector breaks on an
+  unrelated edit.
+- **Configuration-declared secrets are a path, not bytes.** The page
+  shows `_CLIENT_SECRET_FILE` as the path it is. Configuration values are
+  public; that is the whole reason the bytes are on disk.
+- **Stored secrets are sealed** with the existing envelope, under the
+  same KEK as `upstream_refresh_tokens`. One KEK covers every long-lived
+  secret rather than each growing its own scheme.
+
+### Two creation flows, which is the namespaces paying off
+
+- **Enable a built-in.** Pick from the `builtin:` catalogue — a closed
+  set we ship, so the list is finite and ours — and supply only what is
+  the operator's: client id, secret, groups. Endpoints, scopes and quirks
+  come with the definition.
+- **Add a site connector.** `site:<name>`, and every field is the
+  operator's: kind, authorization URL, token URL, scopes.
+
+Four fields versus a dozen, decided entirely by which namespace the id is
+in.
+
+### What a row shows
+
+Id, kind, origin, enabled, the groups permitted, whether a secret is set
+and when it last changed, transfer mode, **how many users have connected
+and when it was last used**.
+
+That last pair is the question an operator actually has — is anyone using
+this? — and it is the reason `last_used_at` is a column rather than a
+nice-to-have. The credd sweeps by last use and cannot report; this can.
+
+### Test, revoke, delete are three different things
+
+**Test** answers "is this configured correctly" without a user's grant:
+resolve the endpoints, confirm the token URL speaks OAuth2, confirm the
+secret file is readable. A connector that is wrong should say so when it
+is configured, not at some user's first attempt.
+
+**Revoke** drops every stored credential for the connector, so users
+re-consent. It is what to do when a client secret has leaked or rotated,
+and it does **not** remove the connector.
+
+Revoke stays available on a **read-only** row. The configuration owns the
+connector's definition; the stored credentials are this server's own
+state, and an operator who cannot revoke them here has to go and delete
+database rows by hand. Read-only is about the definition, not about
+everything on the page.
+
+**Delete** removes a stored connector *and its credentials*. The
+confirmation has to say how many credentials will be destroyed, because
+the alternative is orphaned secrets that no page lists and nobody can
+revoke. Deleting a connector whose definition came from configuration is
+refused, not silently ignored.
 
 ## Testing: a mock Google, built from the documentation
 

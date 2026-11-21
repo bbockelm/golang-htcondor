@@ -54,7 +54,7 @@ never walks a path.
 gdrive2://<fileId>/<name>      download that file, saved as <name>
 gdrive2://<folderId>/<name>    upload, creating or replacing <name> there
 gdrive2:///<name>              upload into My Drive root
-<handle>+gdrive2://...         use the credential gdrive_<handle>
+<cred>+gdrive2://...           read the credential <cred>.use, verbatim
 ```
 
 `<name>` has to be in the URL even though Drive identifies the file by ID,
@@ -67,12 +67,25 @@ Under `drive.file` the only thing this plugin could do with a path is guess.
 
 ## Two names that are not the same name
 
-The **method** is `gdrive2`. The **credential** is still `gdrive`.
+The **method** is `gdrive2`. The **credential** defaults to `gdrive`.
 
 A job says `use_oauth_services = gdrive` whichever plugin it uses. Naming the
 credential after the plugin would oblige every user to hold a second,
 identical Google credential under a second name — a second consent screen and
 a second grant to revoke, for nothing but a version number.
+
+A URL may name its credential outright: `<cred>+gdrive2://` reads
+`<cred>.use`, **verbatim**. The stock plugin reads the same syntax as the
+*composed* name `<provider>_<handle>`, and the difference is deliberate. A
+server that provisions credentials into a credd it shares with an
+administrator has to store them under a service name of its own —
+`webapi_gdrive`, say, so as not to collide with the administrator's
+`gdrive` — and the composing form cannot reach that name: it would need the
+provider half to be `webapi`, which is not a transfer method.
+
+The two plugins never see the same URL, because the methods differ, so no
+URL is ambiguous between them. That is only true while this plugin does not
+claim `gdrive`.
 
 The method is deliberately *not* `gdrive`. A job can carry its own plugin
 (`transfer_plugins`), and claiming a method the stock plugin already
@@ -97,12 +110,13 @@ advertises is the only part of this not yet confirmed against a real pool.
 python3 -m unittest test_gdrive2_plugin -v
 ```
 
-22 tests against a stand-in Drive API on localhost — no network, no Google
+23 tests against a stand-in Drive API on localhost — no network, no Google
 account, no credential. Needs `requests` and HTCondor's `classad2`.
 
-Nine mutants were checked and each is killed by a named test: uploading
+Ten mutants were checked and each is killed by a named test: uploading
 always-create (duplicates), setting `parents` on an update, caching the
-token in memory, naming the credential after the plugin, silently accepting
+token in memory, naming the credential after the plugin, composing
+`<provider>_<cred>` instead of reading it verbatim, silently accepting
 paths, dropping retry, leaking `TransferUrl` into the transfer history,
 dropping the 404 diagnosis, and trusting Drive's `name=` match without
 re-checking it.

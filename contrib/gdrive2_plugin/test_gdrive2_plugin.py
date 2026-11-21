@@ -177,9 +177,16 @@ class TestURLGrammar(unittest.TestCase):
         # Google credential under a second name.
         self.assertEqual(gd.get_token_name('gdrive2://x/y'), 'gdrive')
 
-    def test_handle_selects_a_handled_credential(self):
-        self.assertEqual(gd.get_token_name('restricted+gdrive2://x/y'),
-                         'gdrive_restricted')
+    def test_a_prefix_names_the_credential_verbatim(self):
+        # NOT gdrive_webapi. The stock plugin composes <provider>_<handle>
+        # and so cannot reach a credential stored under a service name of
+        # the server's own, which is the case this exists for.
+        self.assertEqual(gd.get_token_name('webapi_gdrive+gdrive2://x/y'),
+                         'webapi_gdrive')
+
+    def test_an_empty_credential_name_is_refused(self):
+        with self.assertRaises(ValueError):
+            gd.get_token_name('+gdrive2://x/y')
 
 
 # --- download ---------------------------------------------------------
