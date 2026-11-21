@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // The placementd's audit log, read through PLACEMENT_QUERY with TargetType

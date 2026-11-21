@@ -7,7 +7,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	"github.com/htcondor/golang-htcondor/webapi/submitpolicy"
 )
 
 // A ClassAd expression may span lines and still parse, but requirements

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // A login that leaves for the IdP is bound to the browser that started it.

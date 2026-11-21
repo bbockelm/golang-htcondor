@@ -14,11 +14,11 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // Multi-AP actions: every action names its job by a complete id, and is

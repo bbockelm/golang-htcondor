@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // The dashboard's live ticker.

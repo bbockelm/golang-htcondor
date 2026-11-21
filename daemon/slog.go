@@ -3,7 +3,7 @@ package daemon
 import (
 	"log/slog"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Slog returns a *slog.Logger that forwards into the daemon's HTCondor logger

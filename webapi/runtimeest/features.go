@@ -9,7 +9,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	"github.com/htcondor/golang-htcondor/webapi/internal/jobargs"
 )
 
 // Level is how a job is grouped with others for an estimate, from the

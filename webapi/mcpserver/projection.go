@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // What a listing tool returns per row, when the caller does not say.

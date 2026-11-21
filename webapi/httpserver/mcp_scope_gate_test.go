@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/handler/openid"
 )

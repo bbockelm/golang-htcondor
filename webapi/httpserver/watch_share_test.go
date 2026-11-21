@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
-	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/watchpoll"
 )
 
 // watchShareHandler builds a Handler wired to a real watch store. No

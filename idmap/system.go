@@ -17,7 +17,7 @@ package idmap
 import (
 	"context"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // This package maps a token subject to a local account. It deliberately

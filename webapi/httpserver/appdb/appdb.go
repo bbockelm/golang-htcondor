@@ -21,8 +21,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bbockelm/golang-htcondor/internal/privatefile"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
+	"github.com/htcondor/golang-htcondor/internal/privatefile"
 	"github.com/pressly/goose/v3"
 )
 

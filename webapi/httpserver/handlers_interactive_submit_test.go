@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestInteractiveTerminalSubmitFileSetsJobBatchName is a regression test

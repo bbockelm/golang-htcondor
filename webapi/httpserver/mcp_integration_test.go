@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 )

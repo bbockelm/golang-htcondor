@@ -18,9 +18,9 @@ import (
 	"github.com/PelicanPlatform/classad/collections/vm"
 	"github.com/PelicanPlatform/classad/parser"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // historyAd is a finished job as the schedd's history records it.

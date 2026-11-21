@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // stdFileAttrs are the six attributes SetStdin/SetStdout/SetStderr write

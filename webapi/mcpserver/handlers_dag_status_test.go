@@ -6,7 +6,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	"github.com/htcondor/golang-htcondor/webapi/internal/jobargs"
 )
 
 // dagAd builds a job ad from attribute values, so the decisions below

@@ -6,7 +6,7 @@ metrics — plus two long-running servers built on top of it.
 
 ## What's in this repo
 
-- **Go library** (`github.com/bbockelm/golang-htcondor`) — idiomatic
+- **Go library** (`github.com/htcondor/golang-htcondor`) — idiomatic
   Go bindings mirroring the HTCondor Python bindings. Submit jobs,
   query the schedd/collector, transfer files, build sandboxes,
   collect pool metrics. See [docs/library.md](docs/library.md).
@@ -23,19 +23,19 @@ metrics — plus two long-running servers built on top of it.
 As a Go module:
 
 ```bash
-go get github.com/bbockelm/golang-htcondor
+go get github.com/htcondor/golang-htcondor
 ```
 
 As a server (pre-built container, multi-arch amd64/arm64):
 
 ```bash
-docker run -p 8080:8080 ghcr.io/bbockelm/golang-htcondor:latest
+docker run -p 8080:8080 ghcr.io/htcondor/golang-htcondor:latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/bbockelm/golang-htcondor
+git clone https://github.com/htcondor/golang-htcondor
 cd golang-htcondor
 make build
 ```

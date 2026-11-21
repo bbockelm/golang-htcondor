@@ -10,7 +10,7 @@
 //                                                  caller must own the instance.
 //
 // The actual yamux/UDS plumbing lives in
-// github.com/bbockelm/golang-htcondor/webapi/jupytertunnel.
+// github.com/htcondor/golang-htcondor/webapi/jupytertunnel.
 
 package httpserver
 
@@ -31,16 +31,16 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
 	"github.com/gorilla/websocket"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/jupytertunnel"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/jupyterhelperbin"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/jupyterhelperbin"
 )
 
 // jupyterUpgrader returns the websocket.Upgrader for the

@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // Every knob must survive the trip from configuration into the struct the

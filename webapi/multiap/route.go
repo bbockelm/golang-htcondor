@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
 )
 
 // Machine-readable reasons an action could not be routed, carried in

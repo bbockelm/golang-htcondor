@@ -33,7 +33,7 @@ Creates a tarball containing all input files specified in the job ad.
 import (
     "bytes"
     "context"
-    "github.com/bbockelm/golang-htcondor/sandbox"
+    "github.com/htcondor/golang-htcondor/sandbox"
     "github.com/PelicanPlatform/classad/classad"
 )
 
@@ -73,7 +73,7 @@ Extracts files from an output sandbox tarball and places them in the appropriate
 import (
     "context"
     "os"
-    "github.com/bbockelm/golang-htcondor/sandbox"
+    "github.com/htcondor/golang-htcondor/sandbox"
     "github.com/PelicanPlatform/classad/classad"
 )
 

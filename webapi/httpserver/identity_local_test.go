@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/idmap"
 )
 
 // The real shape of the problem: the account is "tannenba" and the token

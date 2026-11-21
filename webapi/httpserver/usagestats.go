@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/usagestats"
 )
 
 // DefaultUsageStatsFlushInterval is how often the call counters are

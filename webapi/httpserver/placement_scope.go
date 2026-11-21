@@ -13,7 +13,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // The placement scope: placement-client signs in through this

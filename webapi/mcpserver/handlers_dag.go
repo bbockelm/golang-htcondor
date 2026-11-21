@@ -8,9 +8,9 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dagman"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dagman"
+	"github.com/htcondor/golang-htcondor/webapi/internal/jobargs"
 )
 
 // A DAGMan workflow submitted from here is an ordinary scheduler-universe

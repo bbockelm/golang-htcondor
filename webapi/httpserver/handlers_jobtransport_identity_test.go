@@ -16,11 +16,11 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
 )
 
 // forwardedBearer builds a JWT that the REST path treats as a forwarded

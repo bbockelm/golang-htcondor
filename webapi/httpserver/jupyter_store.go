@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
-	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
+	"github.com/htcondor/golang-htcondor/webapi/jupytertunnel"
 )
 
 // jupyterStore is the durable half of the JupyterLab session registry.

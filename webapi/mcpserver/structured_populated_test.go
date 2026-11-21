@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 // A schema's typed fields are only checked where a test produces a value

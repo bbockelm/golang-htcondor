@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // countingListener accepts and hangs up, counting connections: a call

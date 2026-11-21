@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // Minting a token reads the pool signing key, which on an access point

@@ -8,14 +8,14 @@ import (
 	"strings"
 	"sync"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/submitlint"
 )
 
 // Submission and credentials in multi-AP mode.

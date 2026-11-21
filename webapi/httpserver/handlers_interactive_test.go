@@ -3,8 +3,8 @@ package httpserver
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
 )
 
 // A session started through MCP or the SSH gateway has to appear on

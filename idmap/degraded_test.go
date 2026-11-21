@@ -19,7 +19,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 func unreachableDirectory() error {

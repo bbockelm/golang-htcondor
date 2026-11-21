@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // A person who signs in before they are onboarded gets a placement-only

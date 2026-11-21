@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/condordocs"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // docSearchArgs is the shared input shape for the documentation lookup

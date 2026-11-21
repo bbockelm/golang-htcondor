@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // The kill-signal and periodic-policy families are compared attribute by

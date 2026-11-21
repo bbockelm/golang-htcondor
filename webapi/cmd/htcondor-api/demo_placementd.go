@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Demo mode runs a condor_placementd when the HTCondor it starts has one,

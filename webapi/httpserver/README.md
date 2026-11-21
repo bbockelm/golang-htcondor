@@ -1132,4 +1132,4 @@ Contributions are welcome! Please:
 
 - HTCondor Documentation: https://htcondor.readthedocs.io/
 - OpenAPI Specification: https://spec.openapis.org/oas/v3.0.0
-- Project Repository: https://github.com/bbockelm/golang-htcondor
+- Project Repository: https://github.com/htcondor/golang-htcondor

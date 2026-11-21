@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Banlist locks out a source that fails to authenticate too often, in

@@ -17,7 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // defaultYamuxConfig returns a yamux config with logging silenced. yamux

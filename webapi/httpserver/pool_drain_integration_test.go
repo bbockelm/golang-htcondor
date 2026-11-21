@@ -10,8 +10,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // scheddRunningJobs is drainJobSource straight from a schedd.

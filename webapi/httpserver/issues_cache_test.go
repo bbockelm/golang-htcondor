@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 // The issues cache holds a SHARED answer: one collection is served to

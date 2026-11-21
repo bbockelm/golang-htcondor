@@ -3,7 +3,7 @@ package daemon
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // TestReadyNameFallsBackToSubsystem verifies that when running under

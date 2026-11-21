@@ -9,11 +9,11 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // Interactive work in multi-AP mode: browser terminals, named sessions

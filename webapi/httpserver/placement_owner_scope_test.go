@@ -13,8 +13,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/ownerscope"
 )
 
 // The placementd account and the local user who shares its Owner.

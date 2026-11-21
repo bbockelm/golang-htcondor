@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // The REST half of the cluster-wide upload, over real HTTP against a real

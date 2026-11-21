@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // fakeTarget records what a reconfigure applied to the running server.

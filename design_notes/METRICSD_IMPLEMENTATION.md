@@ -225,7 +225,7 @@ All tests passing:
 ```bash
 go test ./metricsd
 # PASS
-# ok  	github.com/bbockelm/golang-htcondor/metricsd    0.389s
+# ok  	github.com/htcondor/golang-htcondor/metricsd    0.389s
 ```
 
 ## Usage Example

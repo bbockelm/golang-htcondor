@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // The renderers below write for a language model, which means the first

@@ -8,9 +8,9 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/authz"
-	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/authz"
+	"github.com/htcondor/golang-htcondor/webapi/ownerscope"
 )
 
 // OwnerScope is what a tool call was confined to, so a handler can both

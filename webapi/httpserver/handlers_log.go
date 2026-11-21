@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/userlog"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/userlog"
 )
 
 // maxUserLogSize bounds how many bytes we will read from a job's user-log

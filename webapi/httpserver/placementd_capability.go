@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // The placementd's directory commands (PLACEMENT_QUERY, PLACEMENT_EDIT) exist

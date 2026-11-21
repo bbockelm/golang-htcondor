@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // The issues view in multi-AP mode, from an in-process hub: held jobs on

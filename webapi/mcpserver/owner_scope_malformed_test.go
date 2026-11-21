@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestScopeToOwnerRefusesMalformedConstraint: a constraint that does not parse is refused

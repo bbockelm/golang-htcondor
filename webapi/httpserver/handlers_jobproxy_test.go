@@ -18,8 +18,8 @@ import (
 	"github.com/bbockelm/cedar/security"
 	"github.com/gorilla/websocket"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
 )
 
 // fakeJobConn stands in for the condor_ssh_to_job transport: every

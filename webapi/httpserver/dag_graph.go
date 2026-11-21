@@ -18,10 +18,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dagman"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dagman"
+	"github.com/htcondor/golang-htcondor/webapi/internal/jobargs"
 )
 
 // GET /api/v1/jobs/{cluster}.{proc}/dag returns a DAGMan workflow's

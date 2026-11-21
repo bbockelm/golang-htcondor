@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/appolicy"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/appolicy"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // get_access_point_policy: the access point's own rules, for an agent

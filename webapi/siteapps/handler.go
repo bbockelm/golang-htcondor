@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/webui"
 )
 
 // Caller is what the server knows about whoever is asking.

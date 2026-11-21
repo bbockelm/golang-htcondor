@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/internal/privatefile"
-	"github.com/bbockelm/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/internal/privatefile"
+	"github.com/htcondor/golang-htcondor/sessioncache"
 	"github.com/pressly/goose/v3"
 
 	// glebarez/go-sqlite is the modernc.org/sqlite-derived pure-Go engine that

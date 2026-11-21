@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // The in-page chat's analyze_utilization: the user's own finished jobs,

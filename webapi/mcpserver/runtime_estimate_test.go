@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // loadedEstimator has read five 100-second jobs of alice's and five

@@ -11,7 +11,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Sessions in front of several access points: the access point is

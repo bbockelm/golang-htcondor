@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // expertCookieName marks a session that has stepped through the expert

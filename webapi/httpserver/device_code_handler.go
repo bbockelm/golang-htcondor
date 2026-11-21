@@ -14,7 +14,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
 )
 
 // Device flow error codes (RFC 8628)

@@ -11,12 +11,12 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // actionAPs is a two-AP set whose schedds are listeners that count the

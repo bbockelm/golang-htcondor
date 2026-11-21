@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
 )
 
 // newTestDB opens a fresh unified application DB at dbPath, runs the

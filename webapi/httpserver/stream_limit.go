@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Caps on long-lived streams: the SSE watches, the activity stream, the

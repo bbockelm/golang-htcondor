@@ -10,7 +10,7 @@ import (
 
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // TestWatchSourceHistoryNeedsAnOutcomeSource: the evaluator treats a

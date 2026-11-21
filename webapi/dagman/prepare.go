@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	"github.com/htcondor/golang-htcondor/webapi/submitlint"
+	"github.com/htcondor/golang-htcondor/webapi/submitpolicy"
 )
 
 // Preparing a workflow for submission: everything that happens between

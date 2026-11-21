@@ -11,8 +11,8 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/startd"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/startd"
 )
 
 // PoolActuator applies a plan to real execute points.

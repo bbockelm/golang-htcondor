@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // newAuthTestHandler builds a Handler with a real fosite OAuth2 provider

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // warningHeadline is the banner's own text. Matched instead of the CSS

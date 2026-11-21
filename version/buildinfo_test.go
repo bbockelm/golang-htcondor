@@ -66,7 +66,7 @@ func TestDownstreamDaemonReportsItsOwnBuild(t *testing.T) {
 		Deps: []*debug.Module{
 			{Path: "github.com/PelicanPlatform/classad", Version: "v0.29.7"},
 			{Path: "github.com/bbockelm/cedar", Version: "v0.6.11"},
-			{Path: "github.com/bbockelm/golang-htcondor", Version: "v0.12.10"},
+			{Path: "github.com/htcondor/golang-htcondor", Version: "v0.12.10"},
 			{Path: "github.com/some/unrelated", Version: "v1.0.0"},
 		},
 		Settings: []debug.BuildSetting{
@@ -106,7 +106,7 @@ func TestLdflagsWinOverBuildInfo(t *testing.T) {
 
 	Version = "v1.2.3-release"
 	b := buildFrom(&debug.BuildInfo{
-		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor", Version: "v0.9.9"},
+		Main: debug.Module{Path: "github.com/htcondor/golang-htcondor", Version: "v0.9.9"},
 	}, true)
 	if b.Version != "v1.2.3-release" {
 		t.Errorf("Version = %q, want the injected value to win", b.Version)
@@ -123,7 +123,7 @@ func TestDevelIsNotAVersion(t *testing.T) {
 	Version = "dev"
 
 	b := buildFrom(&debug.BuildInfo{
-		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor", Version: "(devel)"},
+		Main: debug.Module{Path: "github.com/htcondor/golang-htcondor", Version: "(devel)"},
 	}, true)
 	if strings.Contains(b.Stack.String(), "devel") {
 		t.Errorf("stack advertises a placeholder as a version: %q", b.Stack.String())
@@ -188,7 +188,7 @@ func TestUnstampedBuildSaysSo(t *testing.T) {
 	Version, Commit = "dev", "unknown" // the package defaults
 
 	b := buildFrom(&debug.BuildInfo{
-		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor", Version: "(devel)"},
+		Main: debug.Module{Path: "github.com/htcondor/golang-htcondor", Version: "(devel)"},
 		// No vcs.* settings: exactly what a build without .git produces.
 	}, true)
 
@@ -232,18 +232,18 @@ func TestStampedBuildsDoNotApologize(t *testing.T) {
 // Replace pointing at a directory. Confirmed with `go version -m` on a
 // built binary:
 //
-//	dep  github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+//	dep  github.com/htcondor/golang-htcondor v0.0.0-00010101000000-000000000000
 //	=>   ../  (devel)
 func replacedSelf() *debug.BuildInfo {
 	return &debug.BuildInfo{
 		// No VCS stamp: .dockerignore excludes .git, which is why the
 		// release build injects the version with -ldflags at all.
-		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor/webapi", Version: devel},
+		Main: debug.Module{Path: "github.com/htcondor/golang-htcondor/webapi", Version: devel},
 		Deps: []*debug.Module{
 			{Path: "github.com/PelicanPlatform/classad", Version: "v0.29.14"},
 			{Path: "github.com/bbockelm/cedar", Version: "v0.6.19"},
 			{
-				Path:    "github.com/bbockelm/golang-htcondor",
+				Path:    "github.com/htcondor/golang-htcondor",
 				Version: "v0.0.0-00010101000000-000000000000",
 				Replace: &debug.Module{Path: "../", Version: devel},
 			},
@@ -298,7 +298,7 @@ func TestReplacedSelfWithoutLdflagsReportsNothing(t *testing.T) {
 // reported as a placeholder. This is what a workspace build looks like.
 func TestReplacedDependenciesAreOmitted(t *testing.T) {
 	b := buildFrom(&debug.BuildInfo{
-		Main: debug.Module{Path: "github.com/bbockelm/golang-htcondor/webapi", Version: devel},
+		Main: debug.Module{Path: "github.com/htcondor/golang-htcondor/webapi", Version: devel},
 		Deps: []*debug.Module{
 			{
 				Path:    "github.com/PelicanPlatform/classad",

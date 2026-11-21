@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
+	"github.com/htcondor/golang-htcondor/webapi/ownerscope"
 )
 
 // withPlacementOwnerScope marks ctx so the caller's reads are confined by

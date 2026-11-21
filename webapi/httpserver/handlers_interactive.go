@@ -34,13 +34,13 @@ import (
 	"testing/fstest"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/webapi/submitpolicy"
 	"golang.org/x/crypto/ssh"
 )
 

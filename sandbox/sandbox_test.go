@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // TestCreateInputSandboxTar_Simple tests basic input sandbox creation

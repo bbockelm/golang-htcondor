@@ -2,7 +2,7 @@ module submit_demo
 
 go 1.26.0
 
-require github.com/bbockelm/golang-htcondor v0.0.0
+require github.com/htcondor/golang-htcondor v0.0.0
 
 require (
 	github.com/PelicanPlatform/classad v0.38.3 // indirect
@@ -22,4 +22,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace github.com/bbockelm/golang-htcondor => ../..
+replace github.com/htcondor/golang-htcondor => ../..

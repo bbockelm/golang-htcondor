@@ -29,14 +29,14 @@ import (
 	"github.com/bbockelm/cedar/security"
 	"github.com/ory/fosite"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
-	"github.com/bbockelm/golang-htcondor/webapi/sshkeys"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/webapi/sshkeys"
 	"golang.org/x/crypto/ssh"
 )
 

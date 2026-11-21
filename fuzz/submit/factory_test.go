@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // factorySeeds are submit files that make condor_submit use late

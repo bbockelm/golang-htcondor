@@ -20,9 +20,9 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // TestMCPQueryJobsRefusesToPageTheSchedd is the contract that replaced

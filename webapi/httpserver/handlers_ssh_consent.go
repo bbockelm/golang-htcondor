@@ -32,11 +32,11 @@ import (
 	"github.com/ory/fosite"
 	"golang.org/x/time/rate"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
 )
 
 // sshApprovePath is the SPA route that approves an SSH login.

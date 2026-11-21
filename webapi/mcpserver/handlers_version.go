@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/htcondor/golang-htcondor/version"
 )
 
 // The get_version tool exists so an operator (or an agent acting for

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 // gpuHeldAd is a job held a minute ago. gpus > 0 sets RequestGPUs; zero

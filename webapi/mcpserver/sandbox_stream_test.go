@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // The output tools read the job sandbox as a stream. These run them

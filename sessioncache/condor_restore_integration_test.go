@@ -15,9 +15,9 @@ import (
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/sessioncache"
-	"github.com/bbockelm/golang-htcondor/sessioncache/sqlite"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/sessioncache/sqlite"
 )
 
 // TestRestoredSessionResumesWithCondorCollector: a session negotiated with a

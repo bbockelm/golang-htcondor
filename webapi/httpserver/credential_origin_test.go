@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Every request, on every route, is marked as acting for somebody other than

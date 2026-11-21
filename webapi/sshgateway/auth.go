@@ -25,8 +25,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Permission extension keys. The SSH connection handler reads these

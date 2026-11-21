@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/config/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/config/oracle"
 )
 
 // requireOracle skips when the C++ oracle is not linked (i.e. the test was not

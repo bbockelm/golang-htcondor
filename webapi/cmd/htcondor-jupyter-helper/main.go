@@ -41,8 +41,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/version"
-	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
+	"github.com/htcondor/golang-htcondor/version"
+	"github.com/htcondor/golang-htcondor/webapi/jupytertunnel"
 )
 
 const (

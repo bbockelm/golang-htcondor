@@ -27,11 +27,11 @@ import (
 
 	"github.com/bbockelm/cedar/addresses"
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/sessioncache"
-	"github.com/bbockelm/golang-htcondor/version"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/version"
 )
 
 // Options configures a Daemon.

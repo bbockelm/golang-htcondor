@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/watchpoll"
 )
 
 // Two federation hubs, end to end: the stack TestMultiAPEndToEnd builds,

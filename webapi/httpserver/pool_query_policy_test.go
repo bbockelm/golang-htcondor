@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/poolpolicy"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/poolpolicy"
 )
 
 // newPoolPolicyServer is newCollectorReadServer with an attribute policy.

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestInputSandboxRoundtrip tests that input sandbox tarball matches running job's filesystem

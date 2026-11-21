@@ -29,8 +29,8 @@ import (
 
 	cedarclient "github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // SessionCommand is htcondordb's DBSession CEDAR command

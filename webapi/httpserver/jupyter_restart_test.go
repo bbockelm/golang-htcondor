@@ -25,9 +25,9 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
-	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/jupytertunnel"
 )
 
 // jupyterFakeSchedd is a queue for the JupyterLab handlers: it hands out

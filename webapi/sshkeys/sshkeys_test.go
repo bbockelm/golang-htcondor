@@ -28,8 +28,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
 )
 
 func testDB(t *testing.T) *sql.DB {

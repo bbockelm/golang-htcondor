@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 func recs(kind string, n int, owner, message string) []issues.Record {

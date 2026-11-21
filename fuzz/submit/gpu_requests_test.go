@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // gpuRequestAttrs are every attribute the GPU request keywords write.

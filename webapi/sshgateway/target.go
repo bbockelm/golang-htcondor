@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/jobid"
 )
 
 // Target is what the SSH username asked to connect to.

@@ -15,7 +15,7 @@
 // Package filetransfer implements the direction-neutral core of HTCondor's
 // CEDAR file-transfer wire protocol (FileTransfer::DoUpload / DoDownload in
 // src/condor_utils/file_transfer.cpp), factored out so that both the tool-side
-// spool/receive paths (github.com/bbockelm/golang-htcondor Schedd methods) and
+// spool/receive paths (github.com/htcondor/golang-htcondor Schedd methods) and
 // the shadow-side transfer server (golang-ap internal/shadow) drive the exact
 // same bytes.
 //

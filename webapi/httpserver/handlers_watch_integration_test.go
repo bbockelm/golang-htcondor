@@ -12,7 +12,7 @@ import (
 	"github.com/PelicanPlatform/classad/collections"
 	"github.com/PelicanPlatform/classad/collections/vm"
 
-	"github.com/bbockelm/golang-htcondor/jobqueue"
+	"github.com/htcondor/golang-htcondor/jobqueue"
 )
 
 // TestStreamCollectionEventsSSE drives the jobs watch SSE streaming end to end

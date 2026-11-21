@@ -41,7 +41,7 @@ import (
 	"strings"
 	"sync"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Policy is the operator's submit-file configuration. The zero value

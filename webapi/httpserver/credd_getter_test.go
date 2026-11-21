@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // The credd address updater replaces h.credd in the background when a

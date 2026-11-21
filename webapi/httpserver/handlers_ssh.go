@@ -29,9 +29,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/gorilla/websocket"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
 	"golang.org/x/crypto/ssh"
 )
 

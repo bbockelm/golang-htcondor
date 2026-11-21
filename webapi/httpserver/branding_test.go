@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/webui"
 )
 
 // brandingServer is a started server, because the branding routes are

@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
 )
 
 // setupSealer reads the master KEK from kekFile, derives a per-DB

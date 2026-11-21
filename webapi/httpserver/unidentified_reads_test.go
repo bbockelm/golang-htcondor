@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/jobqueue"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/jobqueue"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // Reads this server answers from its own copy of the queue -- a tailed

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // Blocking policy for one poll of a watch URL.

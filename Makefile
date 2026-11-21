@@ -7,12 +7,12 @@ help: ## Display this help message
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS := -X github.com/bbockelm/golang-htcondor/version.Version=$(VERSION) \
-           -X github.com/bbockelm/golang-htcondor/version.Commit=$(COMMIT)
+LDFLAGS := -X github.com/htcondor/golang-htcondor/version.Version=$(VERSION) \
+           -X github.com/htcondor/golang-htcondor/version.Commit=$(COMMIT)
 
 # This is a multi-module repo (no committed go.work — the workspace is dev-local):
-#   .            -> github.com/bbockelm/golang-htcondor         (core library + daemon framework)
-#   ./webapi     -> github.com/bbockelm/golang-htcondor/webapi  (web server, OAuth2 issuer, MCP, UI)
+#   .            -> github.com/htcondor/golang-htcondor         (core library + daemon framework)
+#   ./webapi     -> github.com/htcondor/golang-htcondor/webapi  (web server, OAuth2 issuer, MCP, UI)
 #   ./localcredmon -> .../golang-htcondor/localcredmon          (local credential monitor daemon)
 # Each nested module carries a `replace ... => ../`, so it builds standalone. The
 # build/test targets fan out over the modules, running go in each directory with

@@ -37,7 +37,7 @@ The droppriv package includes a robust UID/GID lookup system with multiple strat
 
 ### Simple lookup
 ```go
-import "github.com/bbockelm/golang-htcondor/droppriv"
+import "github.com/htcondor/golang-htcondor/droppriv"
 
 // Look up a user
 info, err := droppriv.LookupUser("nobody")

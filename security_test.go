@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 func TestGetSecurityConfig_Defaults(t *testing.T) {

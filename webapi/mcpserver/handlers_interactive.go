@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
 )
 
 // interactiveTools is the tool catalog for interactive sessions,

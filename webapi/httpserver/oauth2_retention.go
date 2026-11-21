@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Deleting token rows once they are old enough to be of no use to anybody.

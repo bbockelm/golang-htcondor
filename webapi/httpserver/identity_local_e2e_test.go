@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/idmap"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 )

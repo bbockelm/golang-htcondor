@@ -3,9 +3,9 @@ package httpserver
 import (
 	"net/http"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/webui"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // setupRoutes sets up all HTTP routes for the Handler.

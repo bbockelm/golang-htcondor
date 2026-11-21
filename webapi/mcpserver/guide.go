@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/agentguide"
+	"github.com/htcondor/golang-htcondor/webapi/agentguide"
 )
 
 // The agent guide: the long-form "how to use these tools" text, served by

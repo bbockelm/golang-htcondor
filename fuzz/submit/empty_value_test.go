@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // SubmitHash::submit_param ends with

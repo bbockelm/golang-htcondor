@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 )

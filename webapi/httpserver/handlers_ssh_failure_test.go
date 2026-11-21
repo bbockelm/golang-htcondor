@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
 	"github.com/gorilla/websocket"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // A timeout must be reported as a timeout. "context deadline exceeded"

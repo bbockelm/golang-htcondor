@@ -16,9 +16,9 @@ import (
 
 	"github.com/ory/fosite"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/authz"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/authz"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // requireAdmin gates admin endpoints on (1) a valid session and (2) the

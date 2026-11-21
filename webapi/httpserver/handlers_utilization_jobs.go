@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // GET /api/v1/utilization/jobs: the individual jobs of one workflow from

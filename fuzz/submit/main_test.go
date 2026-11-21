@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // TestMain settles which recorded divergences apply to the oracle this binary

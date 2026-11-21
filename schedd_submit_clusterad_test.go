@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/classadlog"
+	"github.com/htcondor/golang-htcondor/classadlog"
 )
 
 // setAttrsByKey reads the schedd's job_queue.log and returns, for every ad the

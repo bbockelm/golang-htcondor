@@ -11,8 +11,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/batches"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/batches"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // batchAd is a job ad: the given attributes over an owner, a cluster and

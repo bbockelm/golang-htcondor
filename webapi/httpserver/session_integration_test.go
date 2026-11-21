@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestHTTPSessionIntegration tests that session cookies work with HTCondor daemon

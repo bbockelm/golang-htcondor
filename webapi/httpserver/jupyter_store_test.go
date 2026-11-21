@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
 )
 
 func newJupyterTestStore(t *testing.T) *jupyterStore {

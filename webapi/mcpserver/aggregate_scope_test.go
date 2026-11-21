@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // aggregate_jobs used to confine its schedd query with a hardcoded

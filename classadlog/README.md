@@ -4,7 +4,7 @@ Package classadlog provides functionality to read and parse HTCondor's job queue
 
 ## Status
 
-**Functional MVP Complete** - Related to [Issue #47](https://github.com/bbockelm/golang-htcondor/issues/47)
+**Functional MVP Complete** - Related to [Issue #47](https://github.com/htcondor/golang-htcondor/issues/47)
 
 ### Completed
 - ✅ Design document (`design_notes/CLASSAD_LOG_READER_DESIGN.md`)
@@ -71,7 +71,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/bbockelm/golang-htcondor/classadlog"
+    "github.com/htcondor/golang-htcondor/classadlog"
 )
 
 func main() {

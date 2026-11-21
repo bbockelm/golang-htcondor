@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // uploadBundleZip is a minimal publishable bundle, in memory.

@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // TestExtractOutputSandbox_PrivilegedOwnership tests that extracted files are owned by the correct user

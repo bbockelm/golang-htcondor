@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Disabling tools by name.

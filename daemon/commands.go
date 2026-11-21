@@ -5,7 +5,7 @@ import (
 
 	"github.com/bbockelm/cedar/commands"
 	cedarserver "github.com/bbockelm/cedar/server"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // RegisterDefaultCommands wires the standard DaemonCore command handlers onto a

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
+	"github.com/htcondor/golang-htcondor/webapi/usagestats"
 )
 
 // restStatsHandler is statsHandler with REST counting switched on,

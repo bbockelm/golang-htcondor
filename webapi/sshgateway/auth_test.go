@@ -30,7 +30,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/jobid"
 )
 
 func testSigner(t *testing.T) ssh.Signer {
@@ -385,15 +385,15 @@ func askpass(t *testing.T) (env []string, shown func() string) {
 		t.Fatalf("write askpass: %v", err)
 	}
 	return []string{
-			"SSH_ASKPASS=" + script,
-			"SSH_ASKPASS_REQUIRE=force",
-			"DISPLAY=:0",
-			"PATH=" + os.Getenv("PATH"),
-			"HOME=" + dir,
-		}, func() string {
-			b, _ := os.ReadFile(log) //nolint:gosec // a path this function just built under t.TempDir()
-			return string(b)
-		}
+		"SSH_ASKPASS=" + script,
+		"SSH_ASKPASS_REQUIRE=force",
+		"DISPLAY=:0",
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+	}, func() string {
+		b, _ := os.ReadFile(log) //nolint:gosec // a path this function just built under t.TempDir()
+		return string(b)
+	}
 }
 
 // runSSH is the one place a client is actually launched.

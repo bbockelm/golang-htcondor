@@ -9,8 +9,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // When a synchronized htcondordb mirror is advertising, completed-job (history)

@@ -22,7 +22,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // uploadingServer is a handler that accepts uploaded apps, with the

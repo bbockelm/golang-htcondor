@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 func TestJobActionRefusalMapsTheScheddsReason(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // vocab is built once from the linked HTCondor's own keyword table. Keywords()

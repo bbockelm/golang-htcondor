@@ -19,8 +19,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // What an API key may do beyond its creator's own jobs, and how long

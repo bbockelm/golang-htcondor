@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Placement onboarding is the user-facing half of condor_placementd, ported

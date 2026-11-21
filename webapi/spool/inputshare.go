@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // jobStatusHeld is HTCondor's JobStatus for a held job.

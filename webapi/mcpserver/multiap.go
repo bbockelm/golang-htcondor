@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/aggregate"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // Multi-AP mode: the server fronts every access point matching a

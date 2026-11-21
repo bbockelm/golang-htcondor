@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 func TestLoadRuntimeEstimateConfig(t *testing.T) {

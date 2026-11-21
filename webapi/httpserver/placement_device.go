@@ -17,8 +17,8 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
 )
 
 // The placement device flow is a wire-compatible stand-in for

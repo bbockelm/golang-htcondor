@@ -14,8 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/webapi/dagman"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/jobargs"
+	"github.com/htcondor/golang-htcondor/webapi/dagman"
+	"github.com/htcondor/golang-htcondor/webapi/internal/jobargs"
 )
 
 // adFrom builds a job ad from old-format text, which is how the schedd

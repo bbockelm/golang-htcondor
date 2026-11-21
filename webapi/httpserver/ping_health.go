@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // pingHealth tracks recent ping outcomes for the collector and schedd so

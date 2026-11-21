@@ -18,7 +18,7 @@ import (
 	"github.com/bbockelm/cedar/security"
 	cedarserver "github.com/bbockelm/cedar/server"
 
-	"github.com/bbockelm/golang-htcondor/filetransfer"
+	"github.com/htcondor/golang-htcondor/filetransfer"
 )
 
 // Schedd answers QUERY_JOB_ADS(_WITH_AUTH), QUERY_SCHEDD_HISTORY,

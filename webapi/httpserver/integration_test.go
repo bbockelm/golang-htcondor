@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // TestHTTPAPIIntegration tests the full lifecycle of job submission via HTTP API in demo mode

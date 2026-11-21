@@ -50,8 +50,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/aggregate"
 )
 
 // calendarBucket is one day, in seconds: the bucket width every series

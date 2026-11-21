@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // HTTP_API_PLACEMENTD_NAME is this server's own choice and wins; without

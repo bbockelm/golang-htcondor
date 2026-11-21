@@ -10,9 +10,9 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // refuseOn is an AP verdict refusing everyone on ap.

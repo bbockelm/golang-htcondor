@@ -10,7 +10,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // groupAd is a job ad, finished (status 4, with a runtime and completion)

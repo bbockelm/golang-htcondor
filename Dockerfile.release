@@ -100,8 +100,8 @@ ARG COMMIT=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} VERSION=${VERSION} COMMIT=${COMMIT} \
     sh -c 'cd webapi && GOWORK=off go build -v -tags "embed_frontend embed_jupyter_helper embed_condor_docs" \
       -ldflags="-w -s \
-        -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
-        -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
+        -X github.com/htcondor/golang-htcondor/version.Version=${VERSION} \
+        -X github.com/htcondor/golang-htcondor/version.Commit=${COMMIT}" \
       -o /build/htcondor-api ./cmd/htcondor-api'
 
 # Stage 2: Create minimal runtime image

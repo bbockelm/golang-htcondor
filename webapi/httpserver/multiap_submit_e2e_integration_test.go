@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/apassign"
+	"github.com/htcondor/golang-htcondor/webapi/apassign"
 )
 
 // The submit phases of TestMultiAPEndToEnd: AP assignment from a real

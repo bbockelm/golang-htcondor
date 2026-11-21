@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/sharedport"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/sharedport"
 )
 
 // UnderCondorMaster reports whether the process appears to have been spawned by

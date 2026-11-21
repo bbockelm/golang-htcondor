@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // A write deadline that moves while the request is making progress.

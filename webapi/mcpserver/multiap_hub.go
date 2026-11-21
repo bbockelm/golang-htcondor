@@ -7,9 +7,9 @@ import (
 	"maps"
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // Multi-AP mode: the tools served over the federation hub, or routed to

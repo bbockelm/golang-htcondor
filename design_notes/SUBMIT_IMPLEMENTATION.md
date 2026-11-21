@@ -443,4 +443,4 @@ mistake.
 - C++ Implementation: `submit_utils.cpp.reference` (main reference file)
 - HTCondor Documentation: https://htcondor.readthedocs.io/
 - ClassAd Library: `github.com/PelicanPlatform/classad`
-- Config Parser: `github.com/bbockelm/golang-htcondor/config`
+- Config Parser: `github.com/htcondor/golang-htcondor/config`

@@ -8,9 +8,9 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
-	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/spool"
 )
 
 // toolCreateInputUploadURL mints a signed URL for uploading one job's

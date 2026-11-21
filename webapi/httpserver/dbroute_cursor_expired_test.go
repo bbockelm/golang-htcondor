@@ -7,8 +7,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // TestMirrorExpiredCursorDecline: the mirror refusing to resume a page

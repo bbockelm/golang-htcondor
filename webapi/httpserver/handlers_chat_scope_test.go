@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // The chat's job scope: the page asks for mine or everyone, the server

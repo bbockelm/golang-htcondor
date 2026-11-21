@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // bulkAPs: alice has jobs on ap1 and ap2 (fresh) and nothing on ap3

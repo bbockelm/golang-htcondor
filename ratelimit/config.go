@@ -3,7 +3,7 @@ package ratelimit
 import (
 	"strconv"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // ConfigFromHTCondor creates a rate limiter manager from HTCondor configuration

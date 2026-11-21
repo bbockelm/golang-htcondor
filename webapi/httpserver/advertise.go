@@ -4,8 +4,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/bbockelm/golang-htcondor/webapi/apiad"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/apiad"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // AdvertiseAugment returns the daemon.AdvertiseConfig.Augment callback that adds

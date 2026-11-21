@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // TokenInfo stores OAuth2 token information for a trust domain

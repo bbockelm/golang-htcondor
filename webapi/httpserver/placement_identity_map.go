@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/idmap"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // condor_placementd as an identity mapping (HTTP_API_IDENTITY_MAP =

@@ -16,8 +16,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // UserInfo represents user information from the IDP

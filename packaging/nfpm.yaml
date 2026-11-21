@@ -15,7 +15,7 @@ description: |
   front of an HTCondor access point. Runs as a DaemonCore daemon under
   condor_master, so it inherits the pool's configuration and security.
 vendor: ${PKG_VENDOR}
-homepage: https://github.com/bbockelm/golang-htcondor
+homepage: https://github.com/htcondor/golang-htcondor
 license: Apache-2.0
 
 depends:

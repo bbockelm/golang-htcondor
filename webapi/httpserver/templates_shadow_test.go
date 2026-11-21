@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/templates"
+	"github.com/htcondor/golang-htcondor/webapi/templates"
 )
 
 // A user cannot save a shared template under a built-in's id, so another

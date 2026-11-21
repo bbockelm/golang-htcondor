@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/htcondor/golang-htcondor/version"
 )
 
 func TestParseSimpleSubmitFile(t *testing.T) {

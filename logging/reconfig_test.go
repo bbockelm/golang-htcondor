@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // newTestConfig builds a config from the given param map (nil for empty).

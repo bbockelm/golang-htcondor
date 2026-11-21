@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // newMCPPathServer builds a server with MCP enabled and its routes

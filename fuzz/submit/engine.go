@@ -3,8 +3,8 @@ package fuzzsubmit
 import (
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // ClusterID is the cluster both sides submit into. The C++ shim hard-codes it,

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/metricsd"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/metricsd"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	dto "github.com/prometheus/client_model/go"

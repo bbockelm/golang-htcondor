@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
-	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/jobid"
 )
 
 // Review gap in locate_test.go: a hub that cannot be reached is an

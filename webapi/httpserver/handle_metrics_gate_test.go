@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/apikey"
 )
 
 // metricsGateHandler is the smallest Handler that can serve

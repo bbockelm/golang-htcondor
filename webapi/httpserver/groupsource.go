@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // Group source specs, as they appear in HTTP_API_GROUP_SOURCE.

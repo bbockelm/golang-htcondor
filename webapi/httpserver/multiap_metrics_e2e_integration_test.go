@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // Job resource-usage samples in multi-AP mode, end to end: the same

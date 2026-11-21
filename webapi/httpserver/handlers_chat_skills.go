@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // maxSkillChars caps what one skill contributes to the conversation.

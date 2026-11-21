@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
 )
 
 // Interactive sessions in multi-AP mode, end to end, on the stack

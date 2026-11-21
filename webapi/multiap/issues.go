@@ -7,7 +7,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 // ErrEpochsNotFederated is the answer for a read of run-attempt history

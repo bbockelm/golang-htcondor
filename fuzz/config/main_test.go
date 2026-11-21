@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/config/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/config/oracle"
 )
 
 // TestMain settles which upstream changes the linked oracle carries before

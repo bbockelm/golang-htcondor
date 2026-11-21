@@ -19,8 +19,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/dagman"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/dagman"
 )
 
 // TestJobDagIntegration runs real DAGMan workflows, spooled, and asks the

@@ -9,7 +9,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/vscode"
+	"github.com/htcondor/golang-htcondor/webapi/vscode"
 )
 
 func appAd(t *testing.T, src string) *classad.ClassAd {

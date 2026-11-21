@@ -90,7 +90,7 @@ func (b Build) Stamped() bool {
 
 // module paths whose versions are worth reporting.
 const (
-	pathGolangHTCondor = "github.com/bbockelm/golang-htcondor"
+	pathGolangHTCondor = "github.com/htcondor/golang-htcondor"
 	pathClassAd        = "github.com/PelicanPlatform/classad"
 	pathCedar          = "github.com/bbockelm/cedar"
 )

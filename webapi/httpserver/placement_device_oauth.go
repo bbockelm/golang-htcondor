@@ -8,7 +8,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Approval of a placement device request in this server's own RFC 8628 flow

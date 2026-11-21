@@ -13,11 +13,11 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // From one job to the groups it belongs to: the finished jobs a runtime

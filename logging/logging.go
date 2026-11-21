@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // Verbosity levels for logging

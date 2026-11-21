@@ -1,7 +1,7 @@
 package logging_test
 
 import (
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // ExampleLogger demonstrates various logging patterns

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/startd"
+	"github.com/htcondor/golang-htcondor/startd"
 )
 
 // An execute point that publishes no administrative capability is still

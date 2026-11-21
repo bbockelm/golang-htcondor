@@ -1,4 +1,4 @@
-module github.com/bbockelm/golang-htcondor/webapi
+module github.com/htcondor/golang-htcondor/webapi
 
 go 1.26.0
 
@@ -114,13 +114,13 @@ require (
 	github.com/PelicanPlatform/classad/db v0.38.0
 	github.com/PelicanPlatform/classad/dbrpc v0.38.0
 	github.com/bbockelm/cedar v0.7.15
-	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/yamux v0.1.2
+	github.com/htcondor/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/ory/fosite v0.49.0
 	github.com/pressly/goose/v3 v3.27.3
@@ -132,4 +132,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-replace github.com/bbockelm/golang-htcondor => ../
+replace github.com/htcondor/golang-htcondor => ../

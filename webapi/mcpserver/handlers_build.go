@@ -33,7 +33,7 @@ import (
 	"strings"
 	"testing/fstest"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Built-in resource defaults, used when the operator sets none. They match

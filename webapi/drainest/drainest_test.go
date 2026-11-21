@@ -7,7 +7,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 var now = time.Unix(1_800_000_000, 0)

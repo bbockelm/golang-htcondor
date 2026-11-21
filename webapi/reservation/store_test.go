@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
 )
 
 func testStore(t *testing.T) *Store {

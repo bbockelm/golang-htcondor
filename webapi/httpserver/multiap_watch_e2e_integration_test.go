@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/watchpoll"
 )
 
 // Watches, the dashboard and run-attempt history in multi-AP mode, end

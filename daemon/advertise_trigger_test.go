@@ -10,7 +10,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // TestAdvertiseTriggerForcesEarlyUpdate verifies that a send on cfg.Trigger produces an advertise

@@ -2,7 +2,7 @@
 
 package httpserver
 
-import htcondor "github.com/bbockelm/golang-htcondor"
+import htcondor "github.com/htcondor/golang-htcondor"
 
 // testOriginPolicy is the integration build's. Its tests drive the pool
 // from test code -- the harness waiting for daemons, setup queries and

@@ -7,10 +7,10 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // watchHistoryConstraint selects owner's archived jobs that finished at

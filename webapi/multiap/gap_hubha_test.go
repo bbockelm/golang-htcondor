@@ -14,7 +14,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/jobid"
 )
 
 // moveTo makes the pair's active hub `to` by taking the other down for

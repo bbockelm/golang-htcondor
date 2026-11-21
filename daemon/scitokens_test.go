@@ -8,8 +8,8 @@ import (
 
 	"github.com/bbockelm/cedar/commands"
 	cedarserver "github.com/bbockelm/cedar/server"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // writeDaemonConfig writes CONDOR_CONFIG for a test daemon.

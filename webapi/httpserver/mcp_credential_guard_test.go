@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // An OAuth2 caller reaching MCP with no way to mint a credential is

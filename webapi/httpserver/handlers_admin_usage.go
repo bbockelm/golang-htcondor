@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
+	"github.com/htcondor/golang-htcondor/webapi/usagestats"
 )
 
 // AdminUsageResponse is the admin usage page's data. Enabled=false

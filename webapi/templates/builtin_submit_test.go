@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/templates"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/templates"
 )
 
 // TestBuiltinTemplatesParseAndExpand walks every built-in batch

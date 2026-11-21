@@ -14,11 +14,11 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
 )
 
 // Job watches in multi-AP mode: the routes, the share URL's scope, the

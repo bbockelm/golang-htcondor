@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 func scramble(b []byte) []byte { return unscrambleSigningKey(b) } // XOR is its own inverse

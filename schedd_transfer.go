@@ -19,9 +19,9 @@ import (
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
-	"github.com/bbockelm/golang-htcondor/filetransfer"
-	"github.com/bbockelm/golang-htcondor/internal/nullfile"
-	"github.com/bbockelm/golang-htcondor/version"
+	"github.com/htcondor/golang-htcondor/filetransfer"
+	"github.com/htcondor/golang-htcondor/internal/nullfile"
+	"github.com/htcondor/golang-htcondor/version"
 )
 
 // ftOpts is the shared file-transfer wire configuration for the tool-side

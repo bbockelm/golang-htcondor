@@ -8,8 +8,8 @@ import (
 	"os"
 
 	"github.com/bbockelm/cedar/commands"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 func main() {

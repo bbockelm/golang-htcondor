@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/ownerscope"
 )
 
 // Run-attempt (epoch) and transfer history in multi-AP mode.

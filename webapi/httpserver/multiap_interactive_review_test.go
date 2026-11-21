@@ -12,9 +12,9 @@ import (
 
 	"github.com/ory/fosite"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // ssh +work@gateway with work on two APs is refused naming both jobs,

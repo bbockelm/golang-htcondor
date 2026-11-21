@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // utilizationResult is one cached analysis: the compact list the list

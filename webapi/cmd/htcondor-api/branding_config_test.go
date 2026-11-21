@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/webui"
 )
 
 // The footer band is a JSON array in an HTCondor configuration file,

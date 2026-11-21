@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
 )
 
 // limitedBearer is an auth func presenting an IDTOKEN for user@test.domain

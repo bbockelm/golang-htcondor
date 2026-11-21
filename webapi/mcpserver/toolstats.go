@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // ToolStatsRecorder is told about every tool call.

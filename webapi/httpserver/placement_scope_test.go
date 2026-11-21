@@ -16,7 +16,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // placementOAuthServer is an onboarding server with this server's own OAuth2

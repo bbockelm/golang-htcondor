@@ -1,10 +1,10 @@
-module github.com/bbockelm/golang-htcondor/localcredmon
+module github.com/htcondor/golang-htcondor/localcredmon
 
 go 1.26.0
 
 require (
-	github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/htcondor/golang-htcondor v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -24,4 +24,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace github.com/bbockelm/golang-htcondor => ../
+replace github.com/htcondor/golang-htcondor => ../

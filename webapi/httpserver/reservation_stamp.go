@@ -13,10 +13,10 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/reservation"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/reservation"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // stampInterval is how often the idle queue is re-stamped.

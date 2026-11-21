@@ -3,7 +3,7 @@ package httpserver
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // TestMirrorStatusForAd checks the health distillation used in the collector ad:

@@ -2,7 +2,7 @@
 
 package httpserver
 
-import htcondor "github.com/bbockelm/golang-htcondor"
+import htcondor "github.com/htcondor/golang-htcondor"
 
 // testOriginPolicy is the unit suite's: refuse unclassified contexts.
 const testOriginPolicy = htcondor.UnmarkedDeny

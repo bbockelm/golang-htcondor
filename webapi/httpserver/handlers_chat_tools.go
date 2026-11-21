@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/agentguide"
-	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/agentguide"
+	"github.com/htcondor/golang-htcondor/webapi/condordocs"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // chatToolDeps is the interface a tool implementation needs satisfied

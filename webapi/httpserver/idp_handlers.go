@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 	"github.com/ory/fosite"
 )
 

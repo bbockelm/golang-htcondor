@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
 )
 
 func shareToken(t *testing.T, srv *Server, p shareurl.Payload) string {

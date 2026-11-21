@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb"
 	"golang.org/x/crypto/bcrypt"
 )
 

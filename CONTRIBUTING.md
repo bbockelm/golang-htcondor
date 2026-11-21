@@ -6,7 +6,7 @@ Thank you for your interest in contributing to golang-htcondor!
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/bbockelm/golang-htcondor.git
+git clone https://github.com/htcondor/golang-htcondor.git
 cd golang-htcondor
 ```
 

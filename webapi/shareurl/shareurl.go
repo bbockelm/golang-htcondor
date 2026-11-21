@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 	"golang.org/x/crypto/hkdf"
 )
 

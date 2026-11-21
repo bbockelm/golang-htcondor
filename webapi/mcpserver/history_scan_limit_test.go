@@ -10,8 +10,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // archiveCall runs query_job_archive and returns its text and structured

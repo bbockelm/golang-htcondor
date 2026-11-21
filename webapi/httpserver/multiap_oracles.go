@@ -6,8 +6,8 @@ import (
 	"strings"
 	"sync"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
 )
 
 // maxOracleMembers bounds how many access points one refresh consults.

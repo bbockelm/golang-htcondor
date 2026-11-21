@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 func main() {

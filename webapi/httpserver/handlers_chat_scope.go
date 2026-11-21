@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // The chat's job scope.
