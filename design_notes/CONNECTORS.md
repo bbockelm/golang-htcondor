@@ -473,6 +473,53 @@ what runs. The page must say so against the shadowed row rather than
 hiding it: a stored connector that silently does nothing is an operator
 editing a form that has no effect, and finding out from a user.
 
+### Where the configured half actually lives
+
+Three places, with three lifetimes. Saying which is which is the
+difference between an edit that takes and one that silently does not.
+
+- **The configuration file** is authoritative for anything it declares,
+  and it is **public**: values are readable with `condor_config_val`,
+  which is the whole reason `_CLIENT_SECRET_FILE` names a path and the
+  bytes live on disk under their own permissions.
+- **In the process**, nothing is snapshotted into a struct of its own.
+  Following `siteapps.ConfigPolicy`, a connector's config source holds
+  the `*config.Config` and reads `HTTP_API_CONNECTOR_<NS>_<NAME>_*` on
+  each lookup, so there is one copy of the answer and no second one to
+  go stale. A reconfigure replaces the whole source rather than mutating
+  it.
+- **The database** holds what the admin page stored, and is in force the
+  moment it is written. No reconfigure, no restart.
+
+### A reconfigure has to re-read all of it, not diff it
+
+`cmd/htcondor-api/reconfig.go` keeps a table of every parameter the
+daemon has an answer for: those with an `apply` are installed live,
+those without are **reported as needing a restart, naming the
+parameter**. The comment there is the rule worth honouring —
+
+> until a parameter is listed here a change to it either does nothing or
+> is not noticed at all. The second case is the one that costs an
+> operator an afternoon.
+
+Connectors cannot be handled by diffing a parameter, for the same reason
+site apps cannot: a connector's definition is spread over a parameter per
+connector per setting, and **adding a connector adds names nothing was
+watching**. A diff of the names that existed before cannot see a name
+that did not.
+
+So, exactly as `SetSiteAppPolicy` is called: a
+`SetConnectorConfig(*config.Config)` taking the whole configuration,
+called on every reconfigure whether or not anything appeared to change.
+It is also how an operator makes an edit take effect at the moment they
+ran `condor_reconfig`, rather than at the end of some reload interval.
+
+The secret *file* is re-read then too. Its path is in the configuration
+but its contents are not, so a rotated secret with an unchanged path is
+invisible to any diff — the same shape as the skills directory and the
+project-leads file, both of which are re-read unconditionally for this
+reason.
+
 ### Where
 
 `/admin/connectors`, in `ADMIN_NAV`.
