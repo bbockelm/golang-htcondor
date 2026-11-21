@@ -580,6 +580,14 @@ func splitQueueItems(s string) []string {
 	})
 }
 
+// SplitQueueItems applies that same split outside this package.
+//
+// The split happens twice: once here on the list as written, and again on it
+// once its macros have been expanded, since expanding can both introduce
+// separators and leave nothing between two of them. Both have to cut the same
+// way, so neither gets its own copy of the rule.
+func SplitQueueItems(s string) []string { return splitQueueItems(s) }
+
 // readHeredoc reads a heredoc value starting with @=TAG
 func (l *Lexer) readHeredoc() string {
 	l.buf.Reset()

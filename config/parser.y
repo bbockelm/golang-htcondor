@@ -81,6 +81,11 @@ type QueueStatement struct {
 	Count    int      // Number of jobs to queue (0 means 1)
 	VarNames []string // Variable names for iteration
 	Items    []string // Items to iterate over (for "from" or "in" clauses)
+	// ItemsFrom says Items came from a `from` list rather than an `in` one.
+	// The two are cut differently -- `in` cuts a line at commas and
+	// whitespace, `from` keeps each line whole as a row of columns -- and
+	// nothing downstream can tell them apart from Items alone.
+	ItemsFrom bool
 	File     string   // Filename for "from" clause
 	Slice    string   // Slice specification like [1:10]
 }
@@ -412,6 +417,7 @@ queue_statement:
 			Count:    0, // Determined by item count
 			VarNames: []string{"Item"},
 			Items:    $3,
+			ItemsFrom: true,
 		}
 	}
 	| QUEUE var_list FROM item_list
@@ -421,6 +427,7 @@ queue_statement:
 			Count:    0, // Determined by item count
 			VarNames: $2,
 			Items:    $4,
+			ItemsFrom: true,
 		}
 	}
 	| QUEUE queue_count FROM item_list
@@ -430,6 +437,7 @@ queue_statement:
 			Count:    $2,
 			VarNames: []string{"Item"},
 			Items:    $4,
+			ItemsFrom: true,
 		}
 	}
 	| QUEUE queue_count var_list FROM item_list
@@ -439,6 +447,7 @@ queue_statement:
 			Count:    $2,
 			VarNames: $3,
 			Items:    $5,
+			ItemsFrom: true,
 		}
 	}
 	| QUEUE var_list FROM IDENT

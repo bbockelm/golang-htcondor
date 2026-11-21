@@ -366,7 +366,17 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		// The itemdata rewrite above wrote the inline `from ((rows))`
 		// form to temp files this call created, so those stay readable
 		// even when the submit file itself may not name a local file.
-		iterator, err := createIteratorFromQueue(queueStmt, queueFileAccess{
+		// An `in` list is expanded here, before it is cut into items,
+		// because that is the order condor_submit does it in -- see
+		// expandQueueItems. A `from` list is left alone: its lines are rows
+		// of columns rather than items, so cutting one at the whitespace an
+		// expansion introduced would turn one row into several. The
+		// statement itself is left as parsed.
+		expandedStmt := *queueStmt
+		if !queueStmt.ItemsFrom {
+			expandedStmt.Items = expandQueueItems(cfg, queueStmt.Items)
+		}
+		iterator, err := createIteratorFromQueue(&expandedStmt, queueFileAccess{
 			allowAny:   opts.AllowLocalAccess,
 			allowPaths: tempFiles,
 		})
@@ -4791,9 +4801,38 @@ func (sf *SubmitFile) pushMacroContext(jobID JobID, queueVars map[string]string)
 	sf.cfg.Set("ClusterId", strconv.Itoa(jobID.Cluster)) // Alias for Cluster
 	sf.cfg.Set("Node", strconv.Itoa(jobID.Proc))         // Alias for Process (parallel universe)
 
-	// Set queue-specific macros
-	for varName, varValue := range queueVars {
-		sf.cfg.Set(varName, varValue)
+	// Set queue-specific macros.
+	//
+	// In the order the queue statement declared them, because submit macro
+	// names are case-insensitive and the values arrive in a map that is not.
+	// `queue x,X in 001880202` names ONE macro twice; HTCondor assigns the
+	// columns left to right, so `X` takes the second column -- empty, this
+	// item having only one -- and `$(x)` reads empty. The map holds `x` and
+	// `X` as separate keys, so ranging over it set them in whatever order the
+	// runtime chose and the macro kept whichever landed last: the same submit
+	// file produced different job ads from run to run.
+	//
+	// The statement's own names go last so a loop variable named after one of
+	// the iterator's bookkeeping entries (Step, Row, ItemIndex) wins, which is
+	// what HTCondor does; the rest are sorted only so that two runs agree.
+	declared := make(map[string]bool, len(sf.queueVars))
+	for _, name := range sf.queueVars {
+		declared[name] = true
+	}
+	rest := make([]string, 0, len(queueVars))
+	for name := range queueVars {
+		if !declared[name] {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	for _, name := range rest {
+		sf.cfg.Set(name, queueVars[name])
+	}
+	for _, name := range sf.queueVars {
+		if v, ok := queueVars[name]; ok {
+			sf.cfg.Set(name, v)
+		}
 	}
 
 	// Set Item, Step, Row if they're in queueVars

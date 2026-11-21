@@ -1920,3 +1920,54 @@ is a port of glibc's spec parsing by design, and glibc's answer for `%A%ZZ` is
 
 Nothing changed here. The lesson is that the local macOS oracle is not
 authoritative for anything that reaches the C library's printf.
+
+## A queue statement's loop variables bound in map order
+
+Fixed. `queue x,X in 001880202` with `arguments = $(x) E(y)` gave `E(y)` under
+condor_submit and, here, `E(y)` or `001880202 E(y)` depending on the run.
+
+Submit macro names are case-insensitive, so `x` and `X` are one macro named
+twice. condor_submit assigns the columns left to right, so `X` takes the
+second column -- empty, this item having only one -- and `$(x)` reads empty.
+The values reached the macro table through a `map[string]string`, which keeps
+the two spellings apart and has no order, so the surviving value was whichever
+the runtime set last.
+
+The nightly reported it once; a single parse reproduced it about one time in
+five. `queue x,X in (a b, c d)` was worse: eleven different outcomes over
+sixty parses of the same file.
+
+Measured cut-offs, all against SubmitHash:
+
+| statement | `$(x)` |
+|---|---|
+| `queue x,X in 001880202` | empty |
+| `queue X,x in (\na b\nc d\n)` | empty |
+| `queue x,y,X in (\na b c\n)` | empty |
+| `queue x,y in (a b, c d)` | the item |
+
+A loop variable named after one of the iterator's bookkeeping entries (Step,
+Row, ItemIndex) wins over it, which is what condor_submit does.
+
+## An inline item list cut before its macros were expanded
+
+Fixed. `queue in(0 $())` queued one job under condor_submit and two here.
+
+`queue ... in (...)` is one piece of text: condor_submit expands it and then
+cuts it at commas and whitespace. This parser cut first and expanded each
+piece afterwards. Expanding changes where the cuts fall, so the two orders
+disagree whenever a macro in the list is empty or holds a separator:
+
+| list | condor_submit | before the fix |
+|---|---|---|
+| `in(0 $())` | `0` | `0`, `` |
+| `in($() $() z)` | `z` | ``, ``, `z` |
+| `in($(A) b)` with `A=x y` | `x`, `y`, `b` | `x y`, `b` |
+| `in($(A) b)` with `A=x,y` | `x`, `y`, `b` | `x,y`, `b` |
+| `in(a$()b c)` | `ab`, `c` | `ab`, `c` |
+
+A `from` list is cut differently -- its lines are rows of columns, not items --
+and is left alone, so `queue x,y from (\n1 2\n)` is still one row of two
+columns. `QueueStatement` now records which keyword introduced the list,
+because nothing downstream could tell the two forms apart from the items
+alone.
