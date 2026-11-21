@@ -366,7 +366,17 @@ func ParseSubmitFileWithOptions(r io.Reader, opts SubmitParseOptions) (*SubmitFi
 		// The itemdata rewrite above wrote the inline `from ((rows))`
 		// form to temp files this call created, so those stay readable
 		// even when the submit file itself may not name a local file.
-		iterator, err := createIteratorFromQueue(queueStmt, queueFileAccess{
+		// An `in` list is expanded here, before it is cut into items,
+		// because that is the order condor_submit does it in -- see
+		// expandQueueItems. A `from` list is left alone: its lines are rows
+		// of columns rather than items, so cutting one at the whitespace an
+		// expansion introduced would turn one row into several. The
+		// statement itself is left as parsed.
+		expandedStmt := *queueStmt
+		if !queueStmt.ItemsFrom {
+			expandedStmt.Items = expandQueueItems(cfg, queueStmt.Items)
+		}
+		iterator, err := createIteratorFromQueue(&expandedStmt, queueFileAccess{
 			allowAny:   opts.AllowLocalAccess,
 			allowPaths: tempFiles,
 		})

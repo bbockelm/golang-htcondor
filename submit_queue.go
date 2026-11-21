@@ -392,6 +392,31 @@ func (a queueFileAccess) permit(path string) error {
 }
 
 // createIteratorFromQueue creates an appropriate iterator from a QueueStatement
+// expandQueueItems expands the macros in an inline item list and cuts the
+// result into items, which is the order condor_submit does it in.
+//
+// `queue ... in (...)` is one piece of text: it is expanded and then cut at
+// commas and whitespace. Cutting first and expanding each piece afterwards is
+// not the same thing, because expanding changes where the cuts fall. A macro
+// holding `x y` is two items there and one here; a macro holding nothing is
+// no item there and an empty one here, so `queue in(0 $())` queued one job
+// under condor_submit and two here.
+//
+// An item whose expansion fails is kept as written, which is what the rest of
+// the parser does with a value it cannot expand.
+func expandQueueItems(cfg *config.Config, items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		expanded, _, err := cfg.SelectiveExpand(item, func(string) bool { return false })
+		if err != nil {
+			out = append(out, item)
+			continue
+		}
+		out = append(out, config.SplitQueueItems(expanded)...)
+	}
+	return out
+}
+
 func createIteratorFromQueue(qs *config.QueueStatement, access queueFileAccess) (SubmitIterator, error) {
 	count := qs.Count
 	if count == 0 {
