@@ -119,6 +119,70 @@ unknowable rather than absent (see `elicitSupportFromCapabilities`), and
 a design whose safety rests on capability negotiation fails open on
 exactly the clients it cannot interrogate.
 
+## Who may use one: groups
+
+Every connector names the groups that may use it, the way every site app
+names the groups that may see it, with the same vocabulary so an operator
+who has learned one has learned the other:
+
+```
+HTTP_API_CONNECTOR_BUILTIN_GDRIVE_GROUPS = smith_lab, jones_lab
+```
+
+A comma-separated list or a JSON array (`siteapps.ParseGroupList` reads
+both), and `*` for every authenticated user.
+
+**Absent or empty means not offered.** Not "everyone" — a connector
+carries a client registration and puts a consent screen in front of a
+user, and a configuration that silently offered that to the whole access
+point because a line was missing would be the wrong way round. An
+operator who means everyone writes `*`, and the page says which it is.
+
+### A gate in one place is a gate with a hole
+
+The check belongs at every point a connector is reachable, and they are
+easy to enumerate and easy to miss:
+
+- `GET /api/v1/connect` — a connector a caller may not use is not
+  listed. Otherwise the page advertises a button that will refuse.
+- `GET /api/v1/connect/{id}` — refused before any flow begins, so a user
+  is never sent to a provider's consent screen for a credential this
+  access point will not give them.
+- `GET /api/v1/connect/{id}/token` — the Picker's token.
+- The submit path, where a credential is pushed to the credd.
+- The admin page, which shows the groups but is itself admin-gated.
+
+### Removing somebody from a group has to take something away
+
+This is the part that is easy to get wrong, and this repository has got
+the same shape wrong before: the OAuth2 refresh path froze a user's
+groups at consent, so re-running policy caught an operator changing it
+but never caught a user being removed.
+
+A group list gates **obtaining** a credential. If it does not also gate
+**using** one, removing a user from `smith_lab` takes nothing away: their
+refresh token is still in the table, their jobs still get it pushed at
+submit, and a running job keeps receiving it every
+`SEC_CREDENTIAL_REFRESH`.
+
+So:
+
+- Group membership is evaluated **at use**, against current membership,
+  never snapshotted into the credential row at consent.
+- A user outside the groups gets no push at submit time and no token from
+  the Picker endpoint, whatever they hold.
+- What they already hold is not silently deleted — a membership lapse is
+  routine and often temporary, and destroying a refresh token forces a
+  fresh consent screen for what may be an afternoon's change. It is
+  inert while they are outside the group, and `Status` says so rather
+  than reporting the connector as simply unavailable.
+
+Credentials already delivered into a running job's sandbox cannot be
+recalled; the job finishes with what it has. Taking an access point's
+word for a user's membership is bounded by `SEC_CREDENTIAL_REFRESH` in
+the other direction too, which is the honest statement of how quickly a
+removal takes effect.
+
 ## Namespaces, not reserved names
 
 An operator configuring a connector should not have to know a provider's
