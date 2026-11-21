@@ -155,6 +155,43 @@ A `builtin:` definition fixes its default scopes at the narrowest that
 works. For `builtin:gdrive` that is `drive.file`; see "Scope width is
 blast radius" for why that is not merely a compliance choice.
 
+### A `site:` connector is never based on a `builtin:` one
+
+Decided, not open. "Like `builtin:gdrive` but with our own scopes" will
+be asked for, and the answer is no.
+
+Inheritance would make every field of every `builtin:` definition a
+compatibility promise. Today `builtin:` is ours and closed, so when
+Google moves an endpoint or we find a scope was too wide, we change it
+in a release. The moment a `site:` id can be based on one, that same
+change silently alters a connector the operator believes is theirs —
+which is exactly the coupling the namespaces exist to remove, reintroduced
+through the back door.
+
+It also ruins the thing the namespace is for. `builtin:` or `site:` is
+supposed to answer "who defines this" in one word. With inheritance the
+answer becomes "both, depending which field you are asking about", and
+the admin page's read-only/editable split needs a third state for fields
+that are ours but overridden.
+
+And it moves the answer to "why did this connector change behaviour?"
+out of the operator's configuration and database and into our release
+notes, where they will not look.
+
+**The variation people actually want is already there.** A `builtin:`
+connector requires the operator to supply the client registration — that
+is the normal case, not a deviation — and exposes groups, transfer mode
+and scopes. Those fields are the variation surface. Narrowing scopes
+below the definition's default is ordinary; widening them is the
+operator's call to make, and the page should say what it costs, because
+on `builtin:gdrive` widening past `drive.file` is what buys an annual
+security assessment and a token on an execute node that can read the
+whole of someone's Drive.
+
+Anything beyond those fields — different endpoints, a different provider
+wearing a familiar name — means it was never that provider. Write it out
+as a `site:` connector and have the definition say what it actually is.
+
 Namespaces are also how this stays future-proof in the direction we
 cannot see. A third namespace — a provider catalogue fetched from
 somewhere, a vendor's definitions — slots in without renaming anything
@@ -696,9 +733,3 @@ than grow a second one.
   because the entry point must not be shaped in a way that excludes it,
   not because anything has asked for it. Build it when an access point
   turns out to need it.
-- **Does a `site:` connector get to name a `builtin:` definition as its
-  base?** "Like `builtin:gdrive` but our own client and scopes" will be
-  asked for. Allowing it means a `site:` id whose behaviour changes when
-  we change a `builtin:`, which is the coupling namespaces were meant to
-  avoid. Refusing it means copying a definition to vary one field. Not
-  decided; do not let the first implementation decide it by accident.
