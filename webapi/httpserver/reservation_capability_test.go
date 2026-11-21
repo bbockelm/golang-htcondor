@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/reservation"
+	"github.com/htcondor/golang-htcondor/webapi/reservation"
 )
 
 // The case that matters is a pool where nothing published a capability:

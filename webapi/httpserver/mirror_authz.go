@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // A read served from the htcondordb mirror is a read the schedd never

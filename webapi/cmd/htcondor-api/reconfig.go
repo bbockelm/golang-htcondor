@@ -4,8 +4,8 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Reconfigure: what a running htcondor-api does with SIGHUP (or condor_reconfig,

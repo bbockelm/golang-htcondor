@@ -11,11 +11,11 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/aggregate"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/aggregate"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // The dashboard in multi-AP mode: the caller's jobs on every AP, from

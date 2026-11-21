@@ -21,8 +21,8 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/droppriv"
-	"github.com/bbockelm/golang-htcondor/internal/nullfile"
+	"github.com/htcondor/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/internal/nullfile"
 )
 
 // remap represents a path remapping from Source to Dest.

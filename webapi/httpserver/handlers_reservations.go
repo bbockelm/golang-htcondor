@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/reservation"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/reservation"
 )
 
 // reservationJSON is a reservation as the admin UI sends and receives it.

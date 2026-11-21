@@ -14,9 +14,9 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/reservation"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver"
+	"github.com/htcondor/golang-htcondor/webapi/reservation"
 )
 
 // Stamping edits other people's jobs. It does that as the owner of each

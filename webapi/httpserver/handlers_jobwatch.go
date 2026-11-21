@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // GET /api/v1/jobs/{id}/watch -- Server-Sent Events for one job.

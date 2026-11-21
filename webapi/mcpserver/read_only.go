@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Serving MCP read-only, by the installation's decision.

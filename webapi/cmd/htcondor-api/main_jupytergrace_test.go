@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // A grace period cannot be turned off or made unbounded: zero, negative and

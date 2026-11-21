@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
 )
 
 // The in-page chat's analyze_issues: the Issues page's own answer, read

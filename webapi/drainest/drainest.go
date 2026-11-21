@@ -26,7 +26,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // SlotConstraint selects the slot ads Compute needs: every claimed slot

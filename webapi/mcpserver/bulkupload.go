@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/spool"
 )
 
 // Cluster-wide input upload for the MCP tool.

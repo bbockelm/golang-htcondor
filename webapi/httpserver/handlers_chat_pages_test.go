@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // chatToolsOnPage is what the engine advertises on page: the tools tagged

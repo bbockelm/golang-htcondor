@@ -201,8 +201,8 @@ package main
 import (
     "log"
     "github.com/bbockelm/cedar/commands"
-    "github.com/bbockelm/golang-htcondor"
-    "github.com/bbockelm/golang-htcondor/config"
+    "github.com/htcondor/golang-htcondor"
+    "github.com/htcondor/golang-htcondor/config"
 )
 
 func main() {

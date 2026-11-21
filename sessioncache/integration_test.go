@@ -9,8 +9,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/sessioncache"
-	"github.com/bbockelm/golang-htcondor/sessioncache/sqlite"
+	"github.com/htcondor/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/sessioncache/sqlite"
 )
 
 func signingKey(id string, b byte) sqlite.SigningKey {

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
-	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/watchpoll"
 )
 
 // watchURLServer is watchServer plus what minting a URL needs: a signer

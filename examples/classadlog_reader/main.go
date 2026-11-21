@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/classadlog"
+	"github.com/htcondor/golang-htcondor/classadlog"
 )
 
 func main() {

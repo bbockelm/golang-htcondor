@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // SessionData represents the data stored in a session.

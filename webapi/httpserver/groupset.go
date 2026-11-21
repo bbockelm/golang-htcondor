@@ -18,7 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // groupSet is an authorization group list that a reconfigure can replace

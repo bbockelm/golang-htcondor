@@ -11,7 +11,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // newMCPScopeServer is newMCPTransportServer with a signing key, so an

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 const bulkEstimatesPath = "/api/v1/jobs/runtime-estimates"

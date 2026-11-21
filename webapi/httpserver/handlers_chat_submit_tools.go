@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
-	"github.com/bbockelm/golang-htcondor/webapi/templates"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
+	"github.com/htcondor/golang-htcondor/webapi/templates"
 )
 
 // Submit-page chat tools.

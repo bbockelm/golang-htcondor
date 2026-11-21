@@ -7,7 +7,7 @@ import (
 
 	"github.com/bbockelm/cedar/commands"
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // cppPerms is the DCpermission enum (condor_perms.h) in order, and

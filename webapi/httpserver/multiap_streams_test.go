@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // The change streams in multi-AP mode refuse an identity outside

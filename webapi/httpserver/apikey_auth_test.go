@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/apikey"
 )
 
 // authTestHandler builds a minimum-viable Handler (just an apiKeyStore

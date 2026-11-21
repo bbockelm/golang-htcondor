@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Project leads: superuser mode confined to one project's jobs.

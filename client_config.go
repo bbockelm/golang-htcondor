@@ -1,6 +1,6 @@
 package htcondor
 
-import "github.com/bbockelm/golang-htcondor/config"
+import "github.com/htcondor/golang-htcondor/config"
 
 // The WithConfig methods below give a client object an explicit HTCondor
 // configuration. Without one -- the default, and a nil cfg -- the object reads

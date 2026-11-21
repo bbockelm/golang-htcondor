@@ -13,10 +13,10 @@ import (
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // TestMultiAPTwoHubs: /api/v1/aps and /readyz name the active hub and

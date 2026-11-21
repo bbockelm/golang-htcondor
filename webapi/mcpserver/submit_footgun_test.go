@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
+	"github.com/htcondor/golang-htcondor/webapi/submitlint"
 )
 
 // The two submit-file mistakes reported from a live demo, each of which

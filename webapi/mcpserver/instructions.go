@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
+	"github.com/htcondor/golang-htcondor/webapi/condordocs"
 )
 
 // instructionsBudget caps the built-in instructions, the access point's

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	"github.com/htcondor/golang-htcondor/webapi/submitpolicy"
 )
 
 // The policy is worth nothing if a submit surface bypasses it. This

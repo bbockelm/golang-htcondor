@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
 )
 
 type fixedOracle struct {

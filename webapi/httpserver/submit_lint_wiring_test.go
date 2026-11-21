@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitlint"
+	"github.com/htcondor/golang-htcondor/webapi/submitlint"
 )
 
 // postSubmit posts a submit file to /api/v1/jobs as alice and returns the

@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // analyze_issues: what is going wrong on this access point, grouped.

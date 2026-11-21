@@ -21,9 +21,9 @@ import (
 	"github.com/bbockelm/cedar/security"
 	"github.com/gorilla/websocket"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // The action phases of TestMultiAPEndToEnd. Every action is asserted on

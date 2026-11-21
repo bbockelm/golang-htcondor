@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/condordocs"
+	"github.com/htcondor/golang-htcondor/webapi/condordocs"
 )
 
 // isCondorDocTool reports whether name is one of the doc_*

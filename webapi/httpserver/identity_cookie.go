@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // The identity cookie remembers which local account a subject mapped to

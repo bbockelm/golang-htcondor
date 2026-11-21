@@ -13,9 +13,9 @@ import (
 	"weak"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/authz"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/htcondor/golang-htcondor/authz"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/ratelimit"
 )
 
 // globalDefaultConfig holds a pointer to the default HTCondor configuration.

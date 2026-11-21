@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 const upstreamTestIssuer = "https://idp.example.org/token" //nolint:gosec // a public endpoint, not a credential

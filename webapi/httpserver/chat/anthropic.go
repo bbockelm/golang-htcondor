@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // AnthropicAPIVersion pins the Anthropic Messages API version we

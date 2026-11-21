@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/bbockelm/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/sessioncache"
 )
 
 // SharedStore is implemented by the SQLite session store so other subsystems

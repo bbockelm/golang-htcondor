@@ -1,6 +1,6 @@
 package httpserver
 
-import "github.com/bbockelm/golang-htcondor/webapi/issues"
+import "github.com/htcondor/golang-htcondor/webapi/issues"
 
 // holdReasonLabel names a hold code for the dashboard and the issues
 // endpoint.

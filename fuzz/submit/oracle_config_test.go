@@ -5,7 +5,7 @@ package fuzzsubmit
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // TestOracleInitializesConfig checks the shim's own environment rather than

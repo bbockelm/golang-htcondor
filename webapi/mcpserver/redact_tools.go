@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/redact"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/redact"
 )
 
 // Masking credentials in tool results.

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // TestPublicBaseURLDoesNotGuess is the regression at its source. A share

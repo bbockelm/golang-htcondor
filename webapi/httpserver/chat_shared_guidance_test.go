@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/agentguide"
+	"github.com/htcondor/golang-htcondor/webapi/agentguide"
 )
 
 // TestSubmitPagePromptCarriesTheSharedRules: the submission page's

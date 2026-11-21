@@ -14,7 +14,7 @@ import (
 	"fmt"
 
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/golang-htcondor/qmgmt"
+	"github.com/htcondor/golang-htcondor/qmgmt"
 )
 
 // materializeChunkSize is how much itemdata goes out per raw write, matching

@@ -1,6 +1,6 @@
 # Go library reference
 
-The `github.com/bbockelm/golang-htcondor` module is a Go client for
+The `github.com/htcondor/golang-htcondor` module is a Go client for
 HTCondor pools. The API roughly mirrors the
 [HTCondor Python bindings](https://htcondor.readthedocs.io/en/latest/apis/python-bindings/) —
 collector queries, schedd queries / submission / management, sandbox
@@ -13,7 +13,7 @@ HTTP / MCP server built on top of it, see [server.md](server.md).
 ## Install
 
 ```bash
-go get github.com/bbockelm/golang-htcondor
+go get github.com/htcondor/golang-htcondor
 ```
 
 ## Collector
@@ -29,7 +29,7 @@ import (
     "log"
     "time"
 
-    "github.com/bbockelm/golang-htcondor"
+    "github.com/htcondor/golang-htcondor"
 )
 
 collector := htcondor.NewCollector("collector.example.com:9618")
@@ -236,7 +236,7 @@ import (
     "bytes"
     "context"
 
-    "github.com/bbockelm/golang-htcondor/sandbox"
+    "github.com/htcondor/golang-htcondor/sandbox"
 )
 
 // Build an input tarball from the files referenced in a job ad.
@@ -280,7 +280,7 @@ The `metricsd` package collects HTCondor pool metrics (inspired by
 `condor_gangliad`) and exports them in Prometheus format.
 
 ```go
-import "github.com/bbockelm/golang-htcondor/metricsd"
+import "github.com/htcondor/golang-htcondor/metricsd"
 
 registry := metricsd.NewRegistry()
 registry.Register(metricsd.NewPoolCollector(collector))

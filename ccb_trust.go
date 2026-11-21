@@ -8,7 +8,7 @@ import (
 	"unicode"
 
 	"github.com/bbockelm/cedar/addresses"
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // checkStarterBrokers refuses a starter address that routes through a CCB

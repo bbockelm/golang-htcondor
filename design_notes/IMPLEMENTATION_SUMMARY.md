@@ -116,7 +116,7 @@ All unit tests pass:
 === RUN   TestParseJobID
 --- PASS: TestParseJobID (0.00s)
 PASS
-ok      github.com/bbockelm/golang-htcondor/mcpserver   0.189s
+ok      github.com/htcondor/golang-htcondor/mcpserver   0.189s
 ```
 
 Build verification:

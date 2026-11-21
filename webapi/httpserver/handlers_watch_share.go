@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
-	"github.com/bbockelm/golang-htcondor/webapi/watchpoll"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/watchpoll"
 )
 
 // ShareWatchRequest is the body for POST /api/v1/watches/{id}/share.

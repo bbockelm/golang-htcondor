@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/bbockelm/cedar/security"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // CredentialCache satisfies cedar's credential-reading hooks: ReadCredential for files

@@ -94,7 +94,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/bbockelm/golang-htcondor"
+    "github.com/htcondor/golang-htcondor"
 )
 
 func main() {
@@ -122,7 +122,7 @@ To explicitly set the authenticated user for rate limiting:
 ```go
 import (
     "context"
-    "github.com/bbockelm/golang-htcondor"
+    "github.com/htcondor/golang-htcondor"
 )
 
 func queryAsUser(username string) error {
@@ -143,8 +143,8 @@ For applications that need custom rate limiting behavior:
 
 ```go
 import (
-    "github.com/bbockelm/golang-htcondor/config"
-    "github.com/bbockelm/golang-htcondor/ratelimit"
+    "github.com/htcondor/golang-htcondor/config"
+    "github.com/htcondor/golang-htcondor/ratelimit"
 )
 
 func setupCustomRateLimiter() {
@@ -205,7 +205,7 @@ rate limit exceeded: rate limit wait cancelled for user alice: context deadline 
 Get statistics about current rate limiter state:
 
 ```go
-import "github.com/bbockelm/golang-htcondor/ratelimit"
+import "github.com/htcondor/golang-htcondor/ratelimit"
 
 func getRateLimitStats() {
     // Assuming you have access to the manager
@@ -306,7 +306,7 @@ Rate limiting has minimal performance impact:
 To reload rate limits from HTCondor configuration:
 
 ```go
-import "github.com/bbockelm/golang-htcondor"
+import "github.com/htcondor/golang-htcondor"
 
 // Reload configuration and rate limiters
 htcondor.ReloadDefaultConfig()

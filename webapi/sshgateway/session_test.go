@@ -28,7 +28,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
 )
 
 // fakeSession stands in for a session channel inside a sandbox. It

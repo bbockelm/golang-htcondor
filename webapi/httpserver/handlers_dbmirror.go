@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // mirrorProbeTimeout bounds the fallback discovery this endpoint can

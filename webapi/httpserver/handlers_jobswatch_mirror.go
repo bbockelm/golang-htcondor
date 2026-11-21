@@ -22,8 +22,8 @@ import (
 	"net/http"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // How many events to hold for a subscriber that is not reading fast

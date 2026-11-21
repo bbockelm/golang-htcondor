@@ -9,7 +9,7 @@ Notes for automated agents working in this repo. Keep it short; add only non-obv
 - **App modules** (`APP_MODULE_DIRS` in the Makefile): `.`, `webapi`, `localcredmon`.
 - **`examples/*`** and other test clients each have their own module too.
 
-The sub-modules `replace github.com/bbockelm/golang-htcondor => ../`, so they build against the **local** root. That means:
+The sub-modules `replace github.com/htcondor/golang-htcondor => ../`, so they build against the **local** root. That means:
 
 > **After changing any dependency (e.g. bumping `github.com/bbockelm/cedar`), a root-only edit is not enough.** Every module that replaces the root must be re-tidied to the same version, or the `webapi` jupyter-helper build and the CI **Tidy check** fail.
 

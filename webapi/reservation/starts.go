@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // CollectorStarts reports each permissible execute point's published

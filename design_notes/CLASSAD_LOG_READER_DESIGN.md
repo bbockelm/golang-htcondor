@@ -17,7 +17,7 @@ See `classadlog/README.md` for usage documentation.
 
 This document describes the design for a ClassAd log reader in Go that can tail the HTCondor job queue database (usually `job_queue.log`) and reconstruct the state of the schedd queue without querying the schedd directly.
 
-Related to: [Issue #47 - Implement queue database parser](https://github.com/bbockelm/golang-htcondor/issues/47)
+Related to: [Issue #47 - Implement queue database parser](https://github.com/htcondor/golang-htcondor/issues/47)
 
 Reference implementation: HTCondor's `ClassAdLogReader.cpp` and `ClassAdLogReader.h`
 
@@ -407,7 +407,7 @@ import (
     "fmt"
     "time"
 
-    "github.com/bbockelm/golang-htcondor/classadlog"
+    "github.com/htcondor/golang-htcondor/classadlog"
 )
 
 func main() {
@@ -519,7 +519,7 @@ func (s *Server) pollLogUpdates(ctx context.Context) {
 - HTCondor Source: `src/condor_utils/classad_log.*`
 - HTCondor Manual: Job Queue Log format
 - ClassAd Language: https://htcondor.readthedocs.io/en/latest/classad-attributes/
-- Issue #47: https://github.com/bbockelm/golang-htcondor/issues/47
+- Issue #47: https://github.com/htcondor/golang-htcondor/issues/47
 
 ## Open Questions
 

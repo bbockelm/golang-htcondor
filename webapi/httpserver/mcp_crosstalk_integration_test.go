@@ -17,7 +17,7 @@ import (
 
 	"github.com/bbockelm/cedar/security"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // TestMCPForwardedTokenNoCrossTalk is the live guard against one MCP

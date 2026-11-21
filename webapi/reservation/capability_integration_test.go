@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/reservation"
+	"github.com/htcondor/golang-htcondor/webapi/reservation"
 )
 
 // The access point is the only party that knows whether a command rode

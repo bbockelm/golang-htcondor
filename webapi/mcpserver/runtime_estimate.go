@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // runtimeEstimateSchema is the runtime_estimate get_job files when the

@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/ratelimit"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/ratelimit"
 )
 
 // PeekedStreamResponse is the JSON shape returned for one of the

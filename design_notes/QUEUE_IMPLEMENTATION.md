@@ -111,7 +111,7 @@ package main
 
 import (
     "strings"
-    "github.com/bbockelm/golang-htcondor"
+    "github.com/htcondor/golang-htcondor"
 )
 
 func main() {

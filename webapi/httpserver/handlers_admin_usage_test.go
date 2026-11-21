@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
+	"github.com/htcondor/golang-htcondor/webapi/usagestats"
 )
 
 // usageRequest builds a GET for the usage endpoint carrying a session

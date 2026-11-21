@@ -50,7 +50,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // TestDeviceCodeCLIFlow tests the end-to-end device code flow with the CLI

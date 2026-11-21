@@ -5,8 +5,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/webui"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/webui"
 )
 
 // A placement-only session belongs to somebody who signed in but maps to no

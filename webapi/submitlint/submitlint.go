@@ -18,8 +18,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // Inspection is what a pre-submit read of a submit file tells us: whether
@@ -36,7 +36,7 @@ import (
 // produces a job that runs with silently corrupted arguments, the second a
 // hold whose reason reads like a generic file-transfer failure, and the
 // third a job that appears to have printed nothing. See
-// https://github.com/bbockelm/golang-htcondor/issues/183.
+// https://github.com/htcondor/golang-htcondor/issues/183.
 type Inspection struct {
 	// NeedsSpooling reports whether the caller must call
 	// upload_job_input before the job can run.

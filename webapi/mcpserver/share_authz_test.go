@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // A caller whose credential cannot write gets no upload or download URL: the

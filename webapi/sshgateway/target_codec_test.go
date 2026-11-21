@@ -3,7 +3,7 @@ package sshgateway
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/jobid"
 )
 
 // A gateway fronting several access points reads the codec's form as the

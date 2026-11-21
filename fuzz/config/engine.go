@@ -1,5 +1,5 @@
 // Package fuzzconfig holds the differential fuzz harness comparing the native
-// Go config parser (github.com/bbockelm/golang-htcondor/config) against
+// Go config parser (github.com/htcondor/golang-htcondor/config) against
 // HTCondor's reference C++ parser (libcondor_utils, via the oracle subpackage).
 //
 // Scope (mode #1): a PURE parse+expand differential. Both engines parse the
@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // RefEnv is the fixed reference environment prepended to every fuzz input. It

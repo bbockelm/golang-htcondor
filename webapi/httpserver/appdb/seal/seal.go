@@ -59,7 +59,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 	"golang.org/x/crypto/hkdf"
 )
 

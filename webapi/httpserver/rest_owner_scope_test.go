@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // REST job reads are owner-scoped by who the caller is, not by whether a

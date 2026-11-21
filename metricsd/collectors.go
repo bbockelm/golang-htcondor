@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // PoolCollector collects metrics about the HTCondor pool

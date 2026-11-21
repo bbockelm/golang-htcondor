@@ -50,8 +50,8 @@ import (
     "log"
     "time"
 
-    htcondor "github.com/bbockelm/golang-htcondor"
-    "github.com/bbockelm/golang-htcondor/metricsd"
+    htcondor "github.com/htcondor/golang-htcondor"
+    "github.com/htcondor/golang-htcondor/metricsd"
 )
 
 func main() {
@@ -98,8 +98,8 @@ import (
     "context"
     "log"
 
-    htcondor "github.com/bbockelm/golang-htcondor"
-    "github.com/bbockelm/golang-htcondor/metricsd"
+    htcondor "github.com/htcondor/golang-htcondor"
+    "github.com/htcondor/golang-htcondor/metricsd"
 )
 
 func main() {
@@ -143,8 +143,8 @@ package main
 import (
     "log"
 
-    htcondor "github.com/bbockelm/golang-htcondor"
-    "github.com/bbockelm/golang-htcondor/httpserver"
+    htcondor "github.com/htcondor/golang-htcondor"
+    "github.com/htcondor/golang-htcondor/httpserver"
 )
 
 func main() {

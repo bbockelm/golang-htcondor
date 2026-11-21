@@ -15,10 +15,10 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // fakeRuntimeHistory is a history archive in memory: newest first, the

@@ -61,7 +61,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // buildTimeout bounds one enumeration of the account database. A

@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/PelicanPlatform/classad/collections/crypt"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // identityCookieInfo is the HKDF label that derives the identity cookie's

@@ -9,7 +9,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestBulkOwnerScope covers the destructive bulk-endpoint owner scoping: a

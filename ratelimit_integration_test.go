@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/ratelimit"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/ratelimit"
 )
 
 // parseSinfulString extracts the host:port from an HTCondor sinful string

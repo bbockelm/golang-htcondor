@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/utilization"
+	"github.com/htcondor/golang-htcondor/webapi/utilization"
 )
 
 // Rendering a utilization analysis for a language model: the page's

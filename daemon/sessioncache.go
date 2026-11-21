@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/sessioncache"
-	"github.com/bbockelm/golang-htcondor/sessioncache/sqlite"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/sessioncache/sqlite"
 )
 
 // defaultSessionSnapshotInterval is how often the session cache is persisted

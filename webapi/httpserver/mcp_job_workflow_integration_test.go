@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 )

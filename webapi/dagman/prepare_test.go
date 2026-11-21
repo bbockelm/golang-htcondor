@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/submitpolicy"
+	"github.com/htcondor/golang-htcondor/webapi/submitpolicy"
 )
 
 // diamond is the smallest workflow that exercises every shape Prepare

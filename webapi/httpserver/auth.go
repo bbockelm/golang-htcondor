@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/config"
 	jwt "github.com/golang-jwt/jwt/v5"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // authContextKey is the type for the authentication context key

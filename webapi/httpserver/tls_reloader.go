@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/droppriv"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // defaultCertReloadInterval is how often a serving certificate is

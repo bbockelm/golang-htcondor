@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // AddressFilePath returns where subsys writes its address file: the <SUBSYS>_ADDRESS_FILE

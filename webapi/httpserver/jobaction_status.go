@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // jobActionRefusal turns "the schedd acted on nothing" into the reason it

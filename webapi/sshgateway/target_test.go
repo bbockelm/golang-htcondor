@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
 )
 
 func TestParseTargetJobIDs(t *testing.T) {

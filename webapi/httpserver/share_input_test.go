@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
 )
 
 // shareTestHandler builds the smallest Handler that can answer the share

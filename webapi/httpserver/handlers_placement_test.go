@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // fakePlacementd stands in for the daemon so the handler tests exercise

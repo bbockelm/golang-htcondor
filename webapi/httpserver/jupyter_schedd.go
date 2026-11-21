@@ -5,7 +5,7 @@ import (
 	"io/fs"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // jupyterScheddOps is the part of the schedd the JupyterLab handlers use, so

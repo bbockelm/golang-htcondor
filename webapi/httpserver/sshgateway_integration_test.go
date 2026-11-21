@@ -40,8 +40,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
 )
 
 // TestSSHGatewayIntegration drives the whole thing against a real pool:

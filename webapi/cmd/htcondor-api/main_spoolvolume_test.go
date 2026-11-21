@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/spool"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/spool"
 )
 
 // The upload ceiling can be raised and lowered, but never cleared.

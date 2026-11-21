@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/chat"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/chat"
 )
 
 // querySlotsArgs is the LLM-facing input shape. All fields are

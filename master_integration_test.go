@@ -71,7 +71,7 @@ import (
     "log"
     "time"
 
-    htcondor "github.com/bbockelm/golang-htcondor"
+    htcondor "github.com/htcondor/golang-htcondor"
 )
 
 func main() {

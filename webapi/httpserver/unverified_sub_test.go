@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/templates"
+	"github.com/htcondor/golang-htcondor/webapi/templates"
 )
 
 // forgedToken builds a JWT with a real header and payload and a

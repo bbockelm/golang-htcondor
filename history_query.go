@@ -10,7 +10,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
-	"github.com/bbockelm/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/config"
 )
 
 // historyEndpoint is the daemon a history query is sent to. The schedd and the startd speak the

@@ -9,7 +9,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 
 	"github.com/PelicanPlatform/classad/dbrpc"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // With a mirror answering, the dashboard does not need the queue walk at

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // The schedd-ACL oracle reads a schedd's refusal of a level as the user's

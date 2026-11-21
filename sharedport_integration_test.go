@@ -384,8 +384,8 @@ import (
 	"syscall"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/sharedport"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/sharedport"
 )
 
 func main() {

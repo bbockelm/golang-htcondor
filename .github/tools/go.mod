@@ -1,6 +1,6 @@
 // See README.md: this module exists only so CI's htcondordb version has
 // a home Dependabot can bump. Nothing imports it.
-module github.com/bbockelm/golang-htcondor/citools
+module github.com/htcondor/golang-htcondor/citools
 
 go 1.26.0
 

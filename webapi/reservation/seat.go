@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // SeatAd renders the spec's submit file into the job ad one seat would be.

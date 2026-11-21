@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/apikey"
 )
 
 // gateTestKey mints a key with the given scopes and returns its wire

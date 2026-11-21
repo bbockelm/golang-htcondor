@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // versionHandler is a server using the placementd at address, discovered

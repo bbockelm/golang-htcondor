@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jobwatch"
+	"github.com/htcondor/golang-htcondor/webapi/jobwatch"
 )
 
 // Who a stream may show is the one decision here with a wrong answer

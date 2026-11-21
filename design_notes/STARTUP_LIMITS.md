@@ -21,7 +21,7 @@ Startup limits allow you to control the rate at which jobs matching specific cri
 ## Quick Start
 
 ```go
-import "github.com/bbockelm/golang-htcondor"
+import "github.com/htcondor/golang-htcondor"
 
 // Create a schedd connection
 schedd := htcondor.NewSchedd("", "schedd.example.com:9618")

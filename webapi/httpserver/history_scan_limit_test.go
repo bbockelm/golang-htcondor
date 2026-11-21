@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/internal/fakeschedd"
+	"github.com/htcondor/golang-htcondor/webapi/internal/fakeschedd"
 )
 
 // /api/v1/jobs/archive reports a schedd scan that stopped at its scan limit,

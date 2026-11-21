@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/idmap"
 )
 
 // identityIndexStore keeps the last complete GECOS index in the

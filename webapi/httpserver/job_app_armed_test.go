@@ -14,8 +14,8 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/gorilla/websocket"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
 )
 
 // Job content is served on this server's origin, so a browser session with

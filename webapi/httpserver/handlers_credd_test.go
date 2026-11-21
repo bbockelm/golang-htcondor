@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 func TestHandleServiceCredential_AddAndFetchToken(t *testing.T) {

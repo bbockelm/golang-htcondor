@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/droppriv"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/droppriv"
 )
 
 // dropResult reports the outcome of an attempted privilege drop so New can log

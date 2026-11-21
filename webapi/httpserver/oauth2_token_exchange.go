@@ -10,7 +10,7 @@ import (
 
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // RFC 8693 OAuth 2.0 Token Exchange.

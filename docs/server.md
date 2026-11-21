@@ -76,9 +76,9 @@ make rpm PKG_ARCH=arm64            # package an already-built bin/htcondor-api
 Pre-built, multi-arch (amd64/arm64):
 
 ```bash
-docker pull ghcr.io/bbockelm/golang-htcondor:latest
-docker pull ghcr.io/bbockelm/golang-htcondor:v1.0.0
-docker pull ghcr.io/bbockelm/golang-htcondor:devel  # main branch
+docker pull ghcr.io/htcondor/golang-htcondor:latest
+docker pull ghcr.io/htcondor/golang-htcondor:v1.0.0
+docker pull ghcr.io/htcondor/golang-htcondor:devel  # main branch
 ```
 
 Each image is about 15 MB and contains only the `htcondor-api` binary

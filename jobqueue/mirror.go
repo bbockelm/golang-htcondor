@@ -12,7 +12,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/collections"
 
-	"github.com/bbockelm/golang-htcondor/classadlog"
+	"github.com/htcondor/golang-htcondor/classadlog"
 )
 
 // jobFactoryPrivateAttrs are cluster-ad attributes a proc does not inherit and

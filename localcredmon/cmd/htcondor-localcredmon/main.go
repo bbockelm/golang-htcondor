@@ -56,9 +56,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/localcredmon"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/localcredmon"
 )
 
 var (

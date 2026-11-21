@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
 )
 
 // TestDBMirrorCeiling: an operator can raise how many records one

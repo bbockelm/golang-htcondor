@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/siteapps"
+	"github.com/htcondor/golang-htcondor/webapi/siteapps"
 )
 
 // Installing a site app from a GitHub release.

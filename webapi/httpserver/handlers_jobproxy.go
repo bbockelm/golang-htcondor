@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // jobProxyDialTimeout bounds establishing the transport plus the

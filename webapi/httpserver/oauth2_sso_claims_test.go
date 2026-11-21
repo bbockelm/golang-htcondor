@@ -22,7 +22,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/idmap"
 )
 
 const wiscIDP = "https://login.wisc.edu/idp/shibboleth"

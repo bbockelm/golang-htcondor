@@ -11,8 +11,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/appdb/seal"
 	_ "github.com/glebarez/sqlite" // SQLite driver (pure Go, no CGO)
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/appdb/seal"
 	"github.com/ory/fosite"
 	"golang.org/x/crypto/bcrypt"
 )

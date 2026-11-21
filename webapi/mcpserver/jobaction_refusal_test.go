@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // refusingAction answers a job action the way the schedd does when it acts on

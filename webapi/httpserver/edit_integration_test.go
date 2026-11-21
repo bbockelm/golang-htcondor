@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestHTTPEditJobIntegration tests editing a job via HTTP API

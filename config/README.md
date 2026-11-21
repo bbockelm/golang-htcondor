@@ -160,7 +160,7 @@ The following features could be added based on user requirements:
 ### Basic Usage
 
 ```go
-import "github.com/bbockelm/golang-htcondor/config"
+import "github.com/htcondor/golang-htcondor/config"
 
 // Load from environment and default locations
 cfg, err := config.New()

@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"reflect"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // Making a published outputSchema true of what a tool actually returns.

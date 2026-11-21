@@ -9,8 +9,8 @@ import (
 	"github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
 	"github.com/bbockelm/cedar/stream"
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/qmgmt"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/qmgmt"
 )
 
 // SetAttributeFlags controls behavior when setting job attributes. It aliases

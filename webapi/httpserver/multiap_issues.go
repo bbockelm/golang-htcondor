@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/issues"
-	"github.com/bbockelm/golang-htcondor/webapi/multiap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/issues"
+	"github.com/htcondor/golang-htcondor/webapi/multiap"
 )
 
 // multiAPIssueScope is the issues view's scope and source in multi-AP

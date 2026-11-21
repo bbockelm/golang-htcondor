@@ -34,7 +34,7 @@ builds standalone (matching the existing `examples/*` convention).
 ```
 golang-htcondor/                     # repo root
 ├── go.work                          # use ( . ./webapi ./localcredmon )
-├── go.mod                           # github.com/bbockelm/golang-htcondor          (CORE, lean)
+├── go.mod                           # github.com/htcondor/golang-htcondor          (CORE, lean)
 ├── collector.go, schedd.go, …       # core client/protocol API (path unchanged)
 ├── daemon/ classadlog/ qmgmt/ …     # core subpkgs (incl. ratelimit, sessioncache, metricsd)
 │

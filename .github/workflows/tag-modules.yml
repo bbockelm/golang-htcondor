@@ -1,6 +1,6 @@
 # Mirror a release tag onto the per-module tags.
 #
-# This is a multi-module repo: consumers pin github.com/bbockelm/golang-htcondor (root)
+# This is a multi-module repo: consumers pin github.com/htcondor/golang-htcondor (root)
 # and its submodules (.../webapi, .../localcredmon), and Go resolves a submodule version
 # from a <module>/vX.Y.Z tag -- not from the root tag. Without those tags a consumer has
 # no version to ask for and ends up pinning a pseudo-version (a bare commit), which is

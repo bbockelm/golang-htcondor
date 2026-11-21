@@ -9,7 +9,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/webapi/multiap/multiaptest"
+	"github.com/htcondor/golang-htcondor/webapi/multiap/multiaptest"
 )
 
 // windowMirror is an archive holding three jobs submitted at q: 11 and 12

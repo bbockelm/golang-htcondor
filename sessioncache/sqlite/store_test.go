@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/sessioncache"
+	"github.com/htcondor/golang-htcondor/sessioncache"
 )
 
 func sk(id string, b byte) SigningKey { return key(id, b) }

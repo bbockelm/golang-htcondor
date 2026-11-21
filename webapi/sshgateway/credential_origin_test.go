@@ -22,7 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/bbockelm/cedar/security"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // unopenedChannel is an ssh.NewChannel that is never accepted: channelContext

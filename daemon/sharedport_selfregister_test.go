@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/config"
-	"github.com/bbockelm/golang-htcondor/sharedport"
+	"github.com/htcondor/golang-htcondor/config"
+	"github.com/htcondor/golang-htcondor/sharedport"
 )
 
 func spConfig(t *testing.T, text string) *config.Config {

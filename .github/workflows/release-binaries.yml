@@ -148,8 +148,8 @@ jobs:
             -trimpath \
             -tags "embed_frontend embed_jupyter_helper" \
             -ldflags "-s -w \
-              -X github.com/bbockelm/golang-htcondor/version.Version=${VERSION} \
-              -X github.com/bbockelm/golang-htcondor/version.Commit=${COMMIT}" \
+              -X github.com/htcondor/golang-htcondor/version.Version=${VERSION} \
+              -X github.com/htcondor/golang-htcondor/version.Commit=${COMMIT}" \
             -o "$GITHUB_WORKSPACE/dist/htcondor-api" \
             ./cmd/htcondor-api
 

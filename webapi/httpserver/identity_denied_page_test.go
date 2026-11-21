@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/idmap"
 )
 
 // The person reaching this is in a browser, part-way through an SSO

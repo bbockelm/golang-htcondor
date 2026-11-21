@@ -7,7 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/ory/fosite"
 
-	"github.com/bbockelm/golang-htcondor/webapi/mcpserver"
+	"github.com/htcondor/golang-htcondor/webapi/mcpserver"
 )
 
 // Routing /mcp through the upstream SDK's transport instead of the hand-rolled

@@ -1,10 +1,10 @@
-module github.com/bbockelm/golang-htcondor/examples/security_config
+module github.com/htcondor/golang-htcondor/examples/security_config
 
 go 1.26.0
 
 require (
 	github.com/bbockelm/cedar v0.7.15
-	github.com/bbockelm/golang-htcondor v0.0.0-20251113012241-ab2a8efb0537
+	github.com/htcondor/golang-htcondor v0.0.0-20251113012241-ab2a8efb0537
 )
 
 require (
@@ -24,4 +24,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace github.com/bbockelm/golang-htcondor => ../..
+replace github.com/htcondor/golang-htcondor => ../..

@@ -11,10 +11,10 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	"github.com/prometheus/client_golang/prometheus"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
-	"github.com/bbockelm/golang-htcondor/webapi/dbmirror"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/webapi/dbmirror"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // Runtime estimates: GET /api/v1/jobs/{id}/runtime-estimate and the

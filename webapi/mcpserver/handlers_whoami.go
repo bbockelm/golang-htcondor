@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Who the caller is, and what that gets them.

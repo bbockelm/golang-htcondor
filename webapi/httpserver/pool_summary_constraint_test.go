@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // The pool summary ANDs the caller's expression onto its dynamic-slot

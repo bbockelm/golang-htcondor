@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/idmap"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/idmap"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // fileLogger writes to a file the test can read back, which is the only

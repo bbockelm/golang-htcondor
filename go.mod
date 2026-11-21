@@ -1,4 +1,4 @@
-module github.com/bbockelm/golang-htcondor
+module github.com/htcondor/golang-htcondor
 
 go 1.26.0
 

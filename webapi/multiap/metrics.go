@@ -10,8 +10,8 @@ import (
 
 	"github.com/PelicanPlatform/classad/dbrpc"
 
-	"github.com/bbockelm/golang-htcondor/jobid"
-	"github.com/bbockelm/golang-htcondor/webapi/ownerscope"
+	"github.com/htcondor/golang-htcondor/jobid"
+	"github.com/htcondor/golang-htcondor/webapi/ownerscope"
 )
 
 // Job resource-usage samples (job_metrics) in multi-AP mode.

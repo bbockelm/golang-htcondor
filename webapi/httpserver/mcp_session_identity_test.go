@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bbockelm/golang-htcondor/webapi/usagestats"
+	"github.com/htcondor/golang-htcondor/webapi/usagestats"
 )
 
 // postMCPWith sends one JSON-RPC message and returns the recorder, so a

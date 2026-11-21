@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 
-	"github.com/bbockelm/golang-htcondor/webapi/proxyscrub"
+	"github.com/htcondor/golang-htcondor/webapi/proxyscrub"
 )
 
 // yamuxInstance is an Instance whose tunnel is one end of a yamux pair

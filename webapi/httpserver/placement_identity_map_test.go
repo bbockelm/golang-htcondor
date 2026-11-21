@@ -16,8 +16,8 @@ import (
 
 	"github.com/ory/fosite"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/idmap"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/idmap"
 )
 
 // mapWith configures HTTP_API_IDENTITY_MAP on an SSO test server.

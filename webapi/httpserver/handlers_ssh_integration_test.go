@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/gorilla/websocket"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // TestHTTPSSHToJobIntegration drives the WebSocket SSH bridge end-to-end

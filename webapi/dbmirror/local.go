@@ -8,7 +8,7 @@ import (
 	"github.com/PelicanPlatform/classad/classad"
 	cedarclient "github.com/bbockelm/cedar/client"
 	"github.com/bbockelm/cedar/message"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Finding the database without the collector.

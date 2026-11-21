@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/webapi/httpserver/apikey"
+	"github.com/htcondor/golang-htcondor/webapi/httpserver/apikey"
 )
 
 // The condor:/* scopes an API key can be minted with. Kept next to the

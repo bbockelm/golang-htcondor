@@ -8,7 +8,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/apregistry"
+	"github.com/htcondor/golang-htcondor/webapi/apregistry"
 )
 
 // TestSettleWindowAfterSwitch: alice saw 5.0 on hub A; reads move to

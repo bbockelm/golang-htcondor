@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bbockelm/golang-htcondor/webapi/shareurl"
+	"github.com/htcondor/golang-htcondor/webapi/shareurl"
 )
 
 // A deployment without a signing key, or without knowing the REST

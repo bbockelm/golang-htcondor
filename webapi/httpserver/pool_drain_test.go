@@ -13,9 +13,9 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/drainest"
-	"github.com/bbockelm/golang-htcondor/webapi/runtimeest"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/drainest"
+	"github.com/htcondor/golang-htcondor/webapi/runtimeest"
 )
 
 // fakeDrainSlots is the collector: a fixed set of slot ads, an optional

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bbockelm/golang-htcondor/fuzz/config/oracle"
+	"github.com/htcondor/golang-htcondor/fuzz/config/oracle"
 )
 
 // Oracle traits: which upstream changes the linked HTCondor carries.

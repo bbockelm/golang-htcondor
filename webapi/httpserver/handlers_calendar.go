@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"strconv"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // handleCalendar handles GET /api/v1/calendar.

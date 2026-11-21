@@ -15,7 +15,7 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	"github.com/bbockelm/golang-htcondor/webapi/jupytertunnel"
+	"github.com/htcondor/golang-htcondor/webapi/jupytertunnel"
 )
 
 // jupyterSeverableServer serves a Handler and keeps the hijacked tunnel

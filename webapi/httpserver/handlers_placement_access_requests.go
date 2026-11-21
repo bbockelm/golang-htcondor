@@ -14,8 +14,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/logging"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/logging"
 	"golang.org/x/time/rate"
 )
 

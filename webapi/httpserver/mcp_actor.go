@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 const (

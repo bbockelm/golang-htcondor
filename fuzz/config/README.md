@@ -98,7 +98,7 @@ rather than naming one, splitting the time budget between them, so a target
 added upstream of it is fuzzed without a change here.
 
 A failure runs `.github/scripts/nightly-fuzz-issue.sh`, which reports it in
-`bbockelm/golang-htcondor`:
+`htcondor/golang-htcondor`:
 
 - Dedup key: the `nightly-fuzz` label. If an open issue carries it, the run
   comments on that issue; otherwise it opens one. A failure that persists for

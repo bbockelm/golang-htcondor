@@ -5,8 +5,8 @@ package fuzzsubmit
 import (
 	"testing"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/fuzz/submit/oracle"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/fuzz/submit/oracle"
 )
 
 // TestSimpleKeywordTableMatchesOracle checks the Go parser's copy of

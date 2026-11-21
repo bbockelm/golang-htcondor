@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	"github.com/bbockelm/golang-htcondor/logging"
+	"github.com/htcondor/golang-htcondor/logging"
 )
 
 // TestJobInputSpoolProjectionIncludesExecutableAttrs locks in the fix

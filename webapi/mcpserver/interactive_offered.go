@@ -1,6 +1,6 @@
 package mcpserver
 
-import "github.com/bbockelm/golang-htcondor/logging"
+import "github.com/htcondor/golang-htcondor/logging"
 
 // Whether this access point offers interactive sessions at all.
 //

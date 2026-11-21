@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/PelicanPlatform/classad/classad"
-	htcondor "github.com/bbockelm/golang-htcondor"
+	htcondor "github.com/htcondor/golang-htcondor"
 )
 
 // Every attribute ParseAd reads has to be in the projection. One that is

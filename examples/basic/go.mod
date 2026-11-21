@@ -2,9 +2,9 @@ module example
 
 go 1.26.0
 
-replace github.com/bbockelm/golang-htcondor => ../..
+replace github.com/htcondor/golang-htcondor => ../..
 
-require github.com/bbockelm/golang-htcondor v0.0.0-00010101000000-000000000000
+require github.com/htcondor/golang-htcondor v0.0.0-00010101000000-000000000000
 
 require (
 	github.com/PelicanPlatform/classad v0.38.3 // indirect

@@ -25,11 +25,11 @@ import (
 
 	"github.com/PelicanPlatform/classad/classad"
 
-	htcondor "github.com/bbockelm/golang-htcondor"
-	"github.com/bbockelm/golang-htcondor/webapi/interactive"
-	"github.com/bbockelm/golang-htcondor/webapi/jobssh"
+	htcondor "github.com/htcondor/golang-htcondor"
+	"github.com/htcondor/golang-htcondor/webapi/interactive"
+	"github.com/htcondor/golang-htcondor/webapi/jobssh"
 
-	"github.com/bbockelm/golang-htcondor/webapi/sshgateway"
+	"github.com/htcondor/golang-htcondor/webapi/sshgateway"
 )
 
 // The SecurityTag is the whole reason withCondorCredential exists as
